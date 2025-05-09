@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Collection - Gacha Game</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>My Card Collection</h1>
+        <nav>
+            <a href="index.html">Home</a>
+            <a href="draw.html">Draw Cards</a>
+            <a href="collection.html" class="active">My Collection</a>
+            <a href="../admin_frontend/index.html" target="_blank">Admin Panel</a>
+        </nav>
+    </header>
+
+    <main>
+        <section id="collection-controls">
+            <h2>View Collection</h2>
+            <div class="collection-tabs">
+                <button class="tab-button" data-collection="my_cards">My Main Deck</button>
+                <button class="tab-button" data-collection="trade_binder">Trade Binder</button>
+                <button class="tab-button" data-collection="">All Cards (Default)</button> 
+            </div>
+            <div class="custom-collection-selector">
+                <input type="text" id="customCollectionName" placeholder="Enter custom collection name">
+                <button id="viewCustomCollection">View Custom Collection</button>
+            </div>
+        </section>
+
+        <section id="collection-display">
+            <h2>Your Collected Cards</h2>
+            <div id="my-cards-area" class="cards-container">
+                <!-- Cards from the user's collection would be displayed here -->
+                <p>Your collection is empty. Go draw some cards!</p>
+                <!-- Example card structure (to be populated by JS) -->
+                <!-- 
+                <div class="card-item rarity-legendary">
+                    <img src="https://via.placeholder.com/150/FFD700/000000?Text=LGD" alt="Legendary Card">
+                    <h4>Awesome Dragon</h4>
+                    <p>Rarity: Legendary</p>
+                </div> 
+                -->
+            </div>
+        </section>
+
+        <section id="collection-summary">
+            <h3>Collection Stats</h3>
+            <p>Total Cards: <span id="total-cards">0</span></p>
+            <p>Unique Cards: <span id="unique-cards">0</span></p>
+            <!-- More stats can be added -->
+        </section>
+    </main>
+
+    <!-- Modal for editing card information -->
+    <div id="edit-modal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h2>Edit Card</h2>
+            <form id="edit-card-form">
+                <input type="hidden" id="card-id">
+                <input type="hidden" id="edit-collection-name">
+                <div class="form-group">
+                    <label for="card-name">Card Name:</label>
+                    <input type="text" id="card-name" required>
+                </div>
+                <div class="form-group">
+                    <label for="card-rarity">Rarity:</label>
+                    <select id="card-rarity" required>
+                        <option value="Common">Common</option>
+                        <option value="Rare">Rare</option>
+                        <option value="Epic">Epic</option>
+                        <option value="Legendary">Legendary</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="card-points">Point Worth:</label>
+                    <input type="number" id="card-points" required min="0">
+                </div>
+                <div class="form-group">
+                    <label for="card-quantity">Quantity:</label>
+                    <input type="number" id="card-quantity" required min="0">
+                </div>
+                <div class="form-group">
+                    <label for="card-date">Date Got in Stock:</label>
+                    <input type="date" id="card-date" required>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn-primary">Save Changes</button>
+                    <button type="button" class="btn-secondary" id="cancel-edit">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <footer>
+        <p>&copy; 2024 Gacha Game Inc.</p>
+    </footer>
+
+    <script type="module" src="js/firebase-init.js"></script>
+    <script type="module" src="js/script.js"></script>
+    <script type="module" src="js/collection.js"></script> <!-- Specific JS for this page -->
+</body>
+</html> 

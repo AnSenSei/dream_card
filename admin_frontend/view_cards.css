@@ -1,0 +1,148 @@
+.controls {
+    margin-bottom: 20px;
+    text-align: right;
+}
+
+.nav-link {
+    display: inline-block;
+    padding: 8px 15px;
+    background-color: #6c757d;
+    color: white;
+    text-decoration: none;
+    border-radius: 4px;
+    font-size: 14px;
+    transition: background-color 0.3s ease;
+}
+
+.nav-link:hover {
+    background-color: #5a6268;
+}
+
+#cardDisplayArea {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    justify-content: center; /* Optional: centers cards if they don't fill the row */
+}
+
+.card-item {
+    background-color: #f9f9f9;
+    border: 1px solid #eee;
+    border-radius: 8px;
+    padding: 15px;
+    width: calc(50% - 40px); /* Two cards per row, accounting for gap and padding */
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    display: flex; /* For aligning image and details */
+    flex-direction: row; /* Image on left, details on right by default */
+    align-items: flex-start; /* Align items to the top */
+    box-sizing: border-box;
+}
+
+.card-image {
+    margin-right: 15px;
+    flex-shrink: 0; /* Prevent image from shrinking */
+}
+
+.card-image img {
+    max-width: 100px; /* Max width for the image */
+    height: auto;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+}
+
+.card-image-placeholder {
+    width: 100px;
+    height: 140px; /* Approximate height for a card image */
+    background-color: #e0e0e0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: #777;
+    font-size: 12px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+}
+
+.card-details {
+    flex-grow: 1; /* Details section takes remaining space */
+}
+
+.card-details h3 {
+    margin-top: 0;
+    margin-bottom: 10px;
+    font-size: 1.1em;
+    color: #007bff;
+}
+
+.card-details p {
+    margin: 5px 0;
+    font-size: 0.9em;
+    color: #333;
+}
+
+.card-image-url {
+    font-size: 0.8em;
+    color: #777;
+    word-break: break-all; /* Break long URLs */
+}
+
+/* Responsive: one card per row on smaller screens */
+@media (max-width: 768px) {
+    .card-item {
+        width: calc(100% - 30px); /* Full width minus padding */
+        flex-direction: column; /* Stack image and details vertically */
+        align-items: center; /* Center items */
+    }
+    .card-image {
+        margin-right: 0;
+        margin-bottom: 15px;
+    }
+    .card-details {
+        text-align: center;
+    }
+}
+
+#loadingMessage, #errorMessage {
+    text-align: center;
+    font-size: 1.1em;
+    padding: 15px;
+}
+
+#errorMessage {
+    /* Uses .message and .error from style.css, no need to redefine if linked */
+}
+
+.quantity-controls {
+    margin-top: 10px;
+    display: flex;
+    gap: 5px;
+    align-items: center;
+}
+
+.quantity-btn {
+    padding: 5px 10px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.quantity-btn:hover {
+    background-color: #0056b3;
+}
+
+.quantity-input {
+    width: 80px;
+    padding: 4px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    text-align: center;
+}
+
+.quantity-value {
+    font-weight: bold;
+    color: #007bff;
+} 

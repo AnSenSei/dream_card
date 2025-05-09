@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Draw Cards - Gacha Game</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>Draw New Cards</h1>
+    </header>
+
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="draw.html">Draw Cards</a>
+        <a href="collection.html">My Collection</a>
+    </nav>
+
+    <main>
+        <section id="pack-selection">
+            <h2>Select a Pack to Draw From</h2>
+            <div class="pack-container">
+                <div class="pack" id="pack-basic">
+                    <h4>Basic Pack</h4>
+                    <p>Contains a mix of Common and Rare cards. Small chance for Epic or Legendary!</p>
+                    <button onclick="drawCards('pack_basic', 1)">Draw 1 Card</button>
+                    <button onclick="drawCards('pack_basic', 10)">Draw 10 Cards (Guaranteed Epic!)</button>
+                </div>
+                <div class="pack" id="pack-legendary">
+                    <h4>Legendary Boost Pack</h4>
+                    <p>Increased chances for Epic and Legendary cards!</p>
+                    <button onclick="drawCards('pack_legendary_boost', 1)">Draw 1 Card</button>
+                    <button onclick="drawCards('pack_legendary_boost', 10)">Draw 10 Cards (Guaranteed Epic!)</button>
+                </div>
+                <!-- Add more packs as needed -->
+            </div>
+        </section>
+
+        <section id="draw-results">
+            <h3>Your Drawn Cards:</h3>
+            <div id="cards-display-area" class="cards-container">
+                <!-- Cards will be displayed here by JavaScript -->
+                <p>Draw some cards to see them here!</p>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Toy Gacha Game</p>
+    </footer>
+
+    <script type="module" src="js/firebase-init.js"></script>
+    <script type="module" src="js/script.js"></script>
+    <script type="module" src="js/draw.js"></script> <!-- Specific JS for this page -->
+</body>
+</html> 

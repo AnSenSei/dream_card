@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - Pack Details</title>
+    <link rel="stylesheet" href="style.css"> 
+    <link rel="stylesheet" href="pack_detail.css"> 
+</head>
+<body>
+    <header>
+        <h1>Admin Panel - Pack Details</h1>
+        <nav>
+            <a href="index.html">Home</a>
+            <a href="add_pack.html">Add New Pack</a>
+            <a href="view_packs.html">View Packs</a>
+            <a href="view_cards.html">View Cards</a>
+        </nav>
+    </header>
+
+    <main>
+        <section id="pack-detail-section">
+            <div id="packDetailLoadingMessage">Loading pack details...</div>
+            <div id="packDetailErrorMessage" class="error-message" style="display:none;"></div>
+            <div id="packDetailContainer">
+                <!-- Pack details will be loaded here -->
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Card Admin</p>
+    </footer>
+
+    <script src="pack_detail.script.js"></script>
+</body>
+</html> 

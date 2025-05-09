@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-G">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - Add New Pack</title>
+    <link rel="stylesheet" href="style.css"> <!-- General styles -->
+    <link rel="stylesheet" href="add_pack.css"> <!-- Page-specific styles -->
+</head>
+<body>
+    <header>
+        <h1>Admin Panel - Add New Card Pack</h1>
+        <nav>
+            <a href="index.html">Home</a>
+            <a href="view_cards.html">View Cards</a>
+            <!-- Add other navigation links as needed -->
+        </nav>
+    </header>
+
+    <main>
+        <section id="add-pack-form-section">
+            <h2>Create a New Pack</h2>
+            <form id="addPackForm">
+                <div>
+                    <label for="packName">Pack Name:</label>
+                    <input type="text" id="packName" name="packName" required>
+                </div>
+
+                <div>
+                    <label for="packImage">Pack Image (Optional):</label>
+                    <input type="file" id="packImage" name="packImage" accept="image/*">
+                </div>
+
+                <h3>Rarity Configurations</h3>
+                <div id="raritiesContainer">
+                    <!-- JavaScript will generate rarity input groups here -->
+                </div>
+                <button type="button" id="addRarityBtn">Add Rarity Configuration</button>
+
+                <br><br> <!-- Spacing before submit -->
+                <button type="submit">Add Pack</button>
+            </form>
+            <div id="responseMessage"></div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Card Admin</p>
+    </footer>
+
+    <script src="add_pack.script.js"></script>
+</body>
+</html> 

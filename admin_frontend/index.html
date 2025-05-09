@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - Upload Card</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Upload New Card</h1>
+        <div class="controls" style="margin-bottom: 20px; text-align: right;">
+            <a href="view_cards.html" class="nav-link">View All Cards</a>
+            <a href="add_pack.html" class="nav-link">Add New Pack</a>
+            <a href="view_packs.html" class="nav-link">View Packs</a>
+            <a href="admin_collections.html" class="nav-link">Manage Collections</a>
+        </div>
+        <form id="uploadForm">
+            <div>
+                <label for="card_name">Card Name:</label>
+                <input type="text" id="card_name" name="card_name" required>
+            </div>
+            <div>
+                <label for="rarity">Rarity:</label>
+                <input type="text" id="rarity" name="rarity" required>
+            </div>
+            <div>
+                <label for="point_worth">Point Worth:</label>
+                <input type="number" id="point_worth" name="point_worth" required>
+            </div>
+            <div>
+                <label for="quantity">Quantity:</label>
+                <input type="number" id="quantity" name="quantity" min="0" value="0" required>
+            </div>
+            <div>
+                <label for="date_got_in_stock">Date Got In Stock:</label>
+                <input type="date" id="date_got_in_stock" name="date_got_in_stock" required>
+            </div>
+            <div>
+                <label for="collection_metadata_id">Collection:</label>
+                <select id="collection_metadata_id" name="collection_metadata_id">
+                    <option value="">-- Select Collection --</option>
+                    <!-- Options will be populated by JavaScript -->
+                </select>
+            </div>
+            <div>
+                <label for="image_file">Card Image:</label>
+                <input type="file" id="image_file" name="image_file" accept="image/*" required>
+            </div>
+            <button type="submit">Upload Card</button>
+        </form>
+        <div id="message"></div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html> 

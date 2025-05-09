@@ -1,0 +1,82 @@
+/* pack_detail.css */
+body {
+    font-family: sans-serif;
+    margin: 0;
+    background-color: #f4f4f4;
+    color: #333;
+}
+
+header {
+    background-color: #333;
+    color: #fff;
+    padding: 1em 0;
+    text-align: center;
+}
+
+header h1 {
+    margin: 0;
+}
+
+header nav a {
+    color: #fff;
+    margin: 0 15px;
+    text-decoration: none;
+}
+
+header nav a:hover {
+    text-decoration: underline;
+}
+
+main {
+    padding: 20px;
+    max-width: 900px;
+    margin: 20px auto;
+    background-color: #fff;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+}
+
+#packDetailContainer {
+    padding: 15px;
+}
+
+#packDetailContainer img {
+    max-width: 400px; /* Limit image size */
+    height: auto;
+    display: block;
+    margin: 0 auto 20px auto; /* Center image */
+    border-radius: 5px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+#packDetailContainer h2 {
+    text-align: center;
+    color: #333;
+    margin-bottom: 10px;
+}
+
+#packDetailContainer p {
+    font-size: 1.1em;
+    line-height: 1.6;
+    color: #555;
+}
+
+#packDetailContainer p strong {
+    color: #333;
+}
+
+.error-message {
+    color: #a94442;
+    background-color: #f2dede;
+    border: 1px solid #ebccd1;
+    padding: 10px;
+    border-radius: 4px;
+    margin-bottom: 15px;
+}
+
+footer {
+    text-align: center;
+    padding: 20px;
+    background-color: #333;
+    color: #fff;
+    margin-top: 30px;
+} 

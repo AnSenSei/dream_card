@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+itsdangerous
+python-dotenv
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-logging
+google-cloud-storage
+google-cloud-firestore

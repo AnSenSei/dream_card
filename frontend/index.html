@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gacha Game</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>Welcome to the Gacha Game!</h1>
+    </header>
+
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="draw.html">Draw Cards</a>
+        <a href="collection.html">My Collection</a>
+    </nav>
+
+    <main>
+        <section id="hero">
+            <h2>Your Gacha Adventure Awaits!</h2>
+            <p>Collect rare cards, build your deck, and become a legend.</p>
+            <button onclick="navigateTo('draw.html')">Start Drawing!</button>
+        </section>
+
+        <section id="featured-packs">
+            <h3>Featured Packs</h3>
+            <div class="pack-container">
+                <div class="pack">
+                    <h4>Basic Pack</h4>
+                    <p>Common and Rare cards await!</p>
+                </div>
+                <div class="pack">
+                    <h4>Legendary Boost Pack</h4>
+                    <p>Higher chances for Legendary cards!</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Toy Gacha Game</p>
+    </footer>
+
+    <script type="module" src="js/firebase-init.js"></script>
+    <script type="module" src="js/script.js"></script>
+</body>
+</html> 

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - View Card Packs</title>
+    <link rel="stylesheet" href="style.css"> <!-- General styles -->
+    <link rel="stylesheet" href="view_packs.css"> <!-- Page-specific styles -->
+</head>
+<body>
+    <header>
+        <h1>Admin Panel - View Card Packs</h1>
+        <nav>
+            <a href="index.html">Home (Upload Card)</a>
+            <a href="add_pack.html">Add New Pack</a>
+            <a href="view_cards.html">View Cards</a>
+        </nav>
+    </header>
+
+    <main>
+        <section id="packs-list-section">
+            <h2>Available Card Packs</h2>
+            <div id="packsLoadingMessage">Loading packs...</div>
+            <div id="packsErrorMessage" class="error-message" style="display:none;"></div>
+            <div id="packsContainer" class="packs-grid">
+                <!-- Packs will be dynamically inserted here by JavaScript -->
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Card Admin</p>
+    </footer>
+
+    <script src="view_packs.script.js"></script>
+</body>
+</html> 

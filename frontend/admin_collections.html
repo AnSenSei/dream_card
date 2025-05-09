@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - Collection Metadata Management</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .collection-name-link {
+            color: #007bff;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .collection-name-link:hover {
+            text-decoration: underline;
+        }
+        #alerts-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1050;
+            width: 350px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container py-4">
+        <div id="alerts-container"></div>
+        
+        <header class="mb-4">
+            <h1>Collection Metadata Management</h1>
+            <p class="text-muted">Manage your collection metadata for storing cards</p>
+            <hr>
+        </header>
+        
+        <main>
+            <section id="collections-list">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h2>All Collections</h2>
+                    <button class="btn btn-success" id="create-collection-btn">Create New Collection</button>
+                </div>
+                
+                <div class="table-responsive">
+                    <table class="table table-striped table-bordered">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Name</th>
+                                <th>Firestore Collection</th>
+                                <th>Storage Prefix</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="collections-table-body">
+                            <!-- Collection rows will be inserted here by JavaScript -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+        
+        <!-- Collection Details Modal -->
+        <div class="modal fade" id="collection-modal" tabindex="-1" aria-labelledby="collectionModalLabel" aria-hidden="true">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="collectionModalLabel">Add Collection Metadata</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <form id="collection-form">
+                            <div class="mb-3">
+                                <label for="collection-name-input" class="form-label">Collection Name:</label>
+                                <input type="text" class="form-control" id="collection-name-input" name="name" required>
+                                <small class="text-muted">This will be used as the ID for the collection metadata.</small>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="firestore-collection-input" class="form-label">Firestore Collection:</label>
+                                <input type="text" class="form-control" id="firestore-collection-input" name="firestoreCollection" required>
+                                <small class="text-muted">The Firestore collection where cards for this collection will be stored.</small>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="storage-prefix-input" class="form-label">Storage Prefix:</label>
+                                <input type="text" class="form-control" id="storage-prefix-input" name="storagePrefix" required>
+                                <small class="text-muted">The prefix used for storage paths in Cloud Storage.</small>
+                            </div>
+                            
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                <button type="submit" class="btn btn-primary">Save</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="js/admin_collections.js"></script>
+</body>
+</html>

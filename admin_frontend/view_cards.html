@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - View All Cards</title>
+    <link rel="stylesheet" href="style.css"> <link rel="stylesheet" href="view_cards.css"> </head>
+<body>
+    <div class="container">
+        <h1>All Stored Cards</h1>
+        <div class="controls">
+            <a href="index.html" class="nav-link">Upload New Card</a>
+            <div class="collection-selector" style="margin-top: 10px; margin-bottom: 10px;">
+                <label for="collectionNameInput">Collection Name (Optional):</label>
+                <input type="text" id="collectionNameInput" placeholder="default_cards">
+                <button id="fetchCollectionButton">Fetch Cards</button>
+            </div>
+
+            <div id="searchControls" style="margin-top: 10px; margin-bottom: 10px; display: flex; gap: 10px; align-items: center;">
+                <label for="searchInput">Search by Name:</label>
+                <input type="text" id="searchInput" placeholder="Enter card name prefix...">
+                <button id="searchButton">Search</button>
+                <button id="clearSearchButton" style="display:none;">Clear Search</button> 
+            </div>
+
+            <div id="sortControls" style="margin-top: 10px; margin-bottom: 10px; display: flex; gap: 10px; align-items: center;">
+                <label for="sortBySelect">Sort By:</label>
+                <select id="sortBySelect">
+                    <option value="point_worth">Point Worth</option>
+                    <option value="card_name">Card Name</option>
+                    <option value="date_got_in_stock">Date Added</option>
+                    <option value="quantity">Quantity</option>
+                    <option value="rarity">Rarity</option>
+                </select>
+                <label for="sortOrderSelect">Order:</label>
+                <select id="sortOrderSelect">
+                    <option value="desc">Descending</option>
+                    <option value="asc">Ascending</option>
+                </select>
+                <label for="perPageSelect">Items per page:</label>
+                <select id="perPageSelect">
+                    <option value="5">5</option>
+                    <option value="10" selected>10</option>
+                    <option value="20">20</option>
+                    <option value="50">50</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="loadingMessage">Loading cards...</div>
+        <div id="errorMessage" class="message error" style="display:none;"></div>
+        
+        <div id="paginationControlsTop" class="pagination-controls" style="margin-bottom: 15px; text-align: center;">
+            <!-- Pagination controls will be inserted here -->
+        </div>
+
+        <div id="cardDisplayArea">
+            <!-- Cards will be dynamically inserted here -->
+        </div>
+
+        <div id="paginationControlsBottom" class="pagination-controls" style="margin-top: 15px; text-align: center;">
+            <!-- Pagination controls will be inserted here -->
+        </div>
+    </div>
+    <script src="view_cards.script.js"></script>
+</body>
+</html> 

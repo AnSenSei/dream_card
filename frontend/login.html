@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Gacha Game</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background-color: #f0f0f0; /* Or your preferred background */
+        }
+        .login-container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+        .login-container h1 {
+            margin-bottom: 20px;
+        }
+        .login-container input {
+            width: calc(100% - 20px);
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .login-container button {
+            width: 100%;
+            padding: 10px;
+            background-color: #007bff; /* Primary button color */
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .login-container button:hover {
+            background-color: #0056b3;
+        }
+        #error-message {
+            color: red;
+            margin-top: 15px;
+        }
+        .form-switch {
+            margin-top: 20px;
+            font-size: 0.9em;
+        }
+        .form-switch a {
+            color: #007bff;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        .form-switch a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <h1 id="form-title">Login</h1>
+        <input type="email" id="email" placeholder="Email" required>
+        <input type="password" id="password" placeholder="Password" required>
+        <button id="submit-button">Login</button>
+        <button id="google-signin-button" style="margin-top: 10px; background-color: #db4437;">Sign in with Google</button>
+        <p id="error-message"></p>
+        <div class="form-switch">
+            <p id="switch-text">Don't have an account? <a id="toggle-form">Sign Up</a></p>
+        </div>
+    </div>
+
+    <script type="module">
+        import { auth } from './js/firebase-init.js';
+        import { 
+            createUserWithEmailAndPassword, 
+            signInWithEmailAndPassword,
+            onAuthStateChanged,
+            GoogleAuthProvider,
+            signInWithPopup
+        } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+        const emailInput = document.getElementById('email');
+        const passwordInput = document.getElementById('password');
+        const submitButton = document.getElementById('submit-button');
+        const googleSignInButton = document.getElementById('google-signin-button');
+        const errorMessage = document.getElementById('error-message');
+        const toggleFormLink = document.getElementById('toggle-form');
+        const formTitle = document.getElementById('form-title');
+        const switchText = document.getElementById('switch-text');
+
+        let isLoginMode = true;
+
+        // Redirect if already logged in
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                window.location.href = 'index.html'; // Or dashboard.html
+            }
+        });
+
+        function toggleMode() {
+            isLoginMode = !isLoginMode;
+            if (isLoginMode) {
+                formTitle.textContent = 'Login';
+                submitButton.textContent = 'Login';
+                switchText.innerHTML = 'Don\'t have an account? <a id="toggle-form">Sign Up</a>';
+            } else {
+                formTitle.textContent = 'Sign Up';
+                submitButton.textContent = 'Sign Up';
+                switchText.innerHTML = 'Already have an account? <a id="toggle-form">Login</a>';
+            }
+            // Re-attach event listener to the new link
+            document.getElementById('toggle-form').addEventListener('click', toggleMode);
+            errorMessage.textContent = ''; // Clear errors
+        }
+
+        toggleFormLink.addEventListener('click', toggleMode);
+
+        submitButton.addEventListener('click', async () => {
+            const email = emailInput.value;
+            const password = passwordInput.value;
+            errorMessage.textContent = ''; // Clear previous errors
+
+            if (!email || !password) {
+                errorMessage.textContent = 'Please enter both email and password.';
+                return;
+            }
+
+            try {
+                if (isLoginMode) {
+                    // Sign in
+                    await signInWithEmailAndPassword(auth, email, password);
+                    // onAuthStateChanged will handle redirect
+                } else {
+                    // Sign up
+                    await createUserWithEmailAndPassword(auth, email, password);
+                    // onAuthStateChanged will handle redirect
+                }
+            } catch (error) {
+                console.error("Authentication error:", error);
+                errorMessage.textContent = error.message;
+            }
+        });
+
+        // Google Sign-In Logic
+        googleSignInButton.addEventListener('click', async () => {
+            const provider = new GoogleAuthProvider();
+            errorMessage.textContent = ''; // Clear previous errors
+            try {
+                await signInWithPopup(auth, provider);
+                // onAuthStateChanged will handle redirect to index.html
+            } catch (error) {
+                console.error("Google Sign-In error:", error);
+                errorMessage.textContent = "Error with Google Sign-In: " + error.message;
+            }
+        });
+    </script>
+</body>
+</html> 
