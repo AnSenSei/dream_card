@@ -29,8 +29,8 @@ async def upload_card_endpoint(
     point_worth: Annotated[int, Form()],
     date_got_in_stock: Annotated[str, Form()],
     quantity: Annotated[int, Form()] = 0,
-    collection_metadata_id: str | None = None,
-    collectionName: str | None = None  # Keep for backward compatibility
+    collection_metadata_id: str | None = Form(None),  # Change to Form parameter to ensure it's properly received
+    collectionName: str | None = Form(None)  # Keep for backward compatibility, also as Form param
 ):
     """
     Endpoint to upload a card image and its information.
@@ -40,14 +40,19 @@ async def upload_card_endpoint(
     - **point_worth**: How many points the card is worth.
     - **date_got_in_stock**: Date the card was acquired.
     - **quantity**: Number of cards in stock (defaults to 0).
-    - **collection_metadata_id** (query param, optional): The ID of the collection metadata to use.
-    - **collectionName** (query param, optional): The Firestore collection to target (deprecated, use collection_metadata_id instead).
+    - **collection_metadata_id** (form field, optional): The ID of the collection metadata to use.
+    - **collectionName** (form field, optional): The Firestore collection to target (deprecated, use collection_metadata_id instead).
     """
     # For backward compatibility, use collectionName if collection_metadata_id is not provided
     effective_collection_metadata_id = collection_metadata_id if collection_metadata_id is not None else collectionName
 
     logger.info(f"Received request to upload card: {card_name}. Collection metadata ID: {effective_collection_metadata_id if effective_collection_metadata_id else 'default'}")
     logger.info(f"Original collection_metadata_id: {collection_metadata_id}, collectionName: {collectionName}")
+    
+    # Validate that at least one collection parameter has a value if using custom collections
+    if effective_collection_metadata_id is not None and not effective_collection_metadata_id.strip():
+        logger.warning("Received empty collection_metadata_id or collectionName. Will use default collection.")
+        effective_collection_metadata_id = None
     try:
         # The process_new_card_submission function in the service layer will handle
         # uploading the image and then creating the StoredCardInfo object (including image_url).

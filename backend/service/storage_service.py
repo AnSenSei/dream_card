@@ -179,10 +179,14 @@ async def process_new_card_submission(
         logger.info(f"Default storage_prefix set to: '{storage_prefix}'")
 
         logger.info(f"Collection metadata ID received: '{collection_metadata_id}'")
-        if collection_metadata_id:
+        
+        # Handle both None and empty string cases
+        if collection_metadata_id and collection_metadata_id.strip():
             try:
                 # Try to get the metadata for the collection
+                logger.info(f"Looking up metadata for collection: '{collection_metadata_id}'")
                 metadata = await get_collection_metadata(collection_metadata_id)
+                
                 effective_collection_name = metadata.firestoreCollection
                 storage_prefix = metadata.storagePrefix
                 logger.info(f"Using metadata for collection '{collection_metadata_id}': firestoreCollection='{effective_collection_name}', storagePrefix='{storage_prefix}'")
@@ -195,7 +199,10 @@ async def process_new_card_submission(
                     logger.warning(f"Keeping default storage_prefix as '{storage_prefix}'")
                 else:
                     # For other HTTP exceptions, re-raise
+                    logger.error(f"Error retrieving collection metadata: {e.detail}")
                     raise e
+        else:
+            logger.warning(f"No collection metadata ID provided or it was empty. Using default collection: '{effective_collection_name}'")
 
         file_extension = os.path.splitext(image_file.filename)[1]
         # Use the storage_prefix from the collection metadata for the path
@@ -207,13 +214,33 @@ async def process_new_card_submission(
             destination_blob_name=unique_filename
         )
 
+        # Check if a card with this name already exists in the specified collection
+        firestore_client = get_firestore_client()
+        doc_ref = firestore_client.collection(effective_collection_name).document(card_name)
+        doc_snapshot = await doc_ref.get()
+        
+        if doc_snapshot.exists:
+            logger.error(f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'.")
+            raise HTTPException(
+                status_code=409,  # 409 Conflict is more appropriate than 500
+                detail=f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'."
+            )
+            
+        # Generate a signed URL for the image
+        try:
+            signed_image_url = await generate_signed_url(image_url)
+            logger.info(f"Generated signed URL for newly uploaded image")
+        except Exception as sign_error:
+            logger.warning(f"Failed to generate signed URL for {image_url}: {sign_error}")
+            signed_image_url = image_url  # Fall back to original URL
+            
         card_data = StoredCardInfo(
             id=card_name,  # Use card_name as the ID for the StoredCardInfo model
             card_name=card_name,
             rarity=rarity,
             point_worth=point_worth,
             date_got_in_stock=date_got_in_stock,
-            image_url=image_url,
+            image_url=signed_image_url,  # Use the signed URL if available
             quantity=quantity
         )
 
@@ -378,8 +405,14 @@ async def get_all_stored_cards(
 
                 card_data['id'] = doc.id # Ensure ID is part of the data
 
+                # Generate signed URL for the card image
                 if 'image_url' in card_data and card_data['image_url']:
-                    card_data['image_url'] = await generate_signed_url(card_data['image_url'])
+                    try:
+                        card_data['image_url'] = await generate_signed_url(card_data['image_url'])
+                        logger.debug(f"Generated signed URL for image: {card_data['image_url']}")
+                    except Exception as sign_error:
+                        logger.error(f"Failed to generate signed URL for {card_data['image_url']}: {sign_error}")
+                        # Keep the original URL if signing fails
 
                 cards_list.append(StoredCardInfo(**card_data))
             except Exception as e:
@@ -656,3 +689,11 @@ async def get_all_collection_metadata() -> List[CollectionMetadata]:
     except Exception as e:
         logger.error(f"Failed to retrieve all collection metadata from Firestore: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Could not retrieve collection metadata: {str(e)}")
+
+# Function to get all collections - for API naming consistency
+async def get_all_collections() -> List[CollectionMetadata]:
+    """
+    Alias for get_all_collection_metadata.
+    Returns metadata for all collections from the metadata collection.
+    """
+    return await get_all_collection_metadata()

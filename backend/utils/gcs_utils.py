@@ -3,9 +3,13 @@ from datetime import timedelta
 
 import google.auth.transport.requests
 from google.auth import compute_engine
+import os
+from datetime import timedelta
+import google.auth
+import google.auth.transport.requests
+from google.auth import compute_engine
 from google.oauth2 import service_account
-
-from config import get_logger, get_storage_client # Need storage client getter
+from config import get_logger, get_storage_client
 
 logger = get_logger(__name__)
 

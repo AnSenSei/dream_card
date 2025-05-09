@@ -29,9 +29,13 @@ document.addEventListener('DOMContentLoaded', () => {
         // Add collection metadata ID if provided
         const collectionMetadataId = document.getElementById('collection_metadata_id').value;
         console.log('Collection dropdown value:', collectionMetadataId);
+
+        // Prepare the URL with the collection_metadata_id as a query parameter if provided
+        let uploadUrl = backendUrl;
         if (collectionMetadataId) {
-            formData.append('collection_metadata_id', collectionMetadataId);
-            console.log('Sending collection_metadata_id:', collectionMetadataId);
+            uploadUrl = `${backendUrl}?collection_metadata_id=${encodeURIComponent(collectionMetadataId)}`;
+            console.log('Sending collection_metadata_id as query parameter:', collectionMetadataId);
+            console.log('Upload URL with collection_metadata_id:', uploadUrl);
         }
 
         const imageFile = document.getElementById('image_file').files[0];
@@ -43,7 +47,7 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('image_file', imageFile);
 
         try {
-            const response = await fetch(backendUrl, {
+            const response = await fetch(uploadUrl, {
                 method: 'POST',
                 body: formData, // FormData will set the Content-Type to multipart/form-data automatically
             });
