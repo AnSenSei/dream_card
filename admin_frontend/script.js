@@ -82,7 +82,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Function to fetch collection metadata and populate dropdown
     async function fetchCollections(selectedCollectionId = null) {
         try {
-            const response = await fetch(collectionsUrl);
+                // Update URL to use collection-metadata endpoint instead of collections
+                const collectionMetadataUrl = collectionsUrl.replace('/collections', '/collection-metadata');
+                const response = await fetch(collectionMetadataUrl);
             if (!response.ok) {
                 throw new Error('Failed to fetch collections');
             }

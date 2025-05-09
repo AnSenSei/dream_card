@@ -1,7 +1,7 @@
 // Global variables
 const ENDPOINTS = {
-    GET_ALL_COLLECTIONS: 'http://localhost:8080/gacha/api/v1/storage/collections',
-    ADD_COLLECTION: 'http://localhost:8080/gacha/api/v1/storage/collections',
+    GET_ALL_COLLECTIONS: 'http://localhost:8080/gacha/api/v1/storage/collection-metadata',
+    ADD_COLLECTION: 'http://localhost:8080/gacha/api/v1/storage/collection-metadata',
 };
 
 let collectionModal = null;

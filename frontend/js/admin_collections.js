@@ -1,6 +1,6 @@
 // Global variables
 const ENDPOINTS = {
-    GET_ALL_COLLECTIONS: 'http://localhost:8080/gacha/api/v1/storage/collections',
+    GET_ALL_COLLECTIONS: 'http://localhost:8080/gacha/api/v1/storage/collection-metadata',
     ADD_COLLECTION: 'http://localhost:8080/gacha/api/v1/storage/collections',
 };
 
@@ -36,6 +36,29 @@ async function fetchAllCollections() {
 }
 
 // Display collections in the collections table
+// Update the function that fetches the collections if it exists in this file
+function fetchCollections() {
+    const apiBaseUrl = 'http://localhost:8080/gacha/api/v1';
+    // Use collection-metadata endpoint instead of collections
+    fetch(`${apiBaseUrl}/storage/collection-metadata`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Failed to fetch collections');
+            }
+            return response.json();
+        })
+        .then(collections => {
+            displayCollections(collections);
+        })
+        .catch(error => {
+            console.error('Error fetching collections:', error);
+            const errorMessage = document.createElement('div');
+            errorMessage.className = 'alert alert-danger';
+            errorMessage.textContent = 'Failed to load collections: ' + error.message;
+            document.querySelector('.container').prepend(errorMessage);
+        });
+}
+
 function displayCollections(collections) {
     const collectionsTableBody = document.getElementById('collections-table-body');
     if (!collectionsTableBody) return;
@@ -74,6 +97,13 @@ function displayCollections(collections) {
         collectionsTableBody.appendChild(row);
     });
 }
+
+// Call fetchCollections on page load if this is the collections page
+document.addEventListener('DOMContentLoaded', function() {
+    if (document.getElementById('collections-table-body')) {
+        fetchCollections();
+    }
+});
 
 // Show modal for adding a new collection
 function showAddCollectionModal() {
