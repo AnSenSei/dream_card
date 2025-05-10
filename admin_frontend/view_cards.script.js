@@ -39,10 +39,42 @@ document.addEventListener('DOMContentLoaded', async () => {
         errorMessageDiv.style.display = 'none';
         cardDisplayArea.innerHTML = ''; // Clear previous cards
 
-        let url = `${baseUrl}/cards?page=${currentPage}&per_page=${itemsPerPage}&sort_by=${currentSortBy}&sort_order=${currentSortOrder}`;
-        if (currentCollectionName && currentCollectionName.trim() !== '') {
-            url += `&collectionName=${encodeURIComponent(currentCollectionName.trim())}`;
-        }
+            // Get collection name from URL if not already set
+            if (!currentCollectionName) {
+                const urlParams = new URLSearchParams(window.location.search);
+                const collectionParam = urlParams.get('collectionName');
+                if (collectionParam) {
+                    currentCollectionName = collectionParam;
+                    console.log(`Set currentCollectionName from URL: ${currentCollectionName}`);
+                }
+            }
+    
+                // Parse URL params before each fetch if not already set
+                if (!currentCollectionName) {
+                    parseUrlParams();
+                }
+        
+                // Build URL with proper query parameters
+                const queryParams = new URLSearchParams();
+                queryParams.append('page', currentPage);
+                queryParams.append('per_page', itemsPerPage);
+                queryParams.append('sort_by', currentSortBy);
+                queryParams.append('sort_order', currentSortOrder);
+                
+                if (currentCollectionName && currentCollectionName.trim() !== '') {
+                    queryParams.append('collectionName', currentCollectionName.trim());
+                    console.log(`Adding collection name to fetch: ${currentCollectionName}`);
+                }
+                
+                if (currentSearchQuery && currentSearchQuery.trim() !== '') {
+                    queryParams.append('search_query', currentSearchQuery.trim());
+                    clearSearchButton.style.display = 'inline-block';
+                } else {
+                    clearSearchButton.style.display = 'none';
+                }
+                
+                const url = `${baseUrl}/cards?${queryParams.toString()}`;
+                console.log(`Fetching cards from: ${url}`);
         if (currentSearchQuery && currentSearchQuery.trim() !== '') {
             url += `&search_query=${encodeURIComponent(currentSearchQuery.trim())}`;
             clearSearchButton.style.display = 'inline-block';

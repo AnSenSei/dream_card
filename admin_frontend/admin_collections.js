@@ -11,6 +11,22 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initialize Bootstrap modal
     collectionModal = new bootstrap.Modal(document.getElementById('collection-modal'));
     
+    // Function to update sort parameters and refresh
+    function updateSortParams(sortBy, sortOrder) {
+        const params = new URLSearchParams(window.location.search);
+        
+        // Update sort parameters
+        if (sortBy) params.set('sort_by', sortBy);
+        if (sortOrder) params.set('sort_order', sortOrder);
+        
+        // Create the new URL with updated parameters
+        const newUrl = `${window.location.pathname}?${params.toString()}`;
+        history.pushState({}, '', newUrl);
+        
+        // Refresh the data with new parameters
+        fetchAllCollections();
+    }
+    
     // Initial setup
     fetchAllCollections();
     
@@ -22,7 +38,9 @@ document.addEventListener('DOMContentLoaded', function() {
 // Fetch all collections
 async function fetchAllCollections() {
     try {
-        const response = await fetch(ENDPOINTS.GET_ALL_COLLECTIONS);
+        // Add explicit sort parameters to ensure consistent sorting behavior
+        const url = `${ENDPOINTS.GET_ALL_COLLECTIONS}?sort_by=card_name&sort_order=desc`;
+        const response = await fetch(url);
         if (!response.ok) {
             throw new Error('Failed to fetch collections');
         }
@@ -105,6 +123,24 @@ function showAddCollectionModal() {
     collectionModal.show();
 }
 
+// Parse URL query parameters
+function getUrlParams() {
+    const params = new URLSearchParams(window.location.search);
+    return {
+        collectionName: params.get('collectionName'),
+        sort_by: params.get('sort_by') || 'point_worth',
+        sort_order: params.get('sort_order') || 'desc'
+    };
+}
+
+// Function to navigate to a collection view
+function viewCollection(collectionName) {
+    if (!collectionName) return;
+    
+    // Redirect to the view_cards.html page with the collection name as a parameter
+    window.location.href = `/admin_frontend/view_cards.html?collectionName=${encodeURIComponent(collectionName)}`;
+}
+
 // Handle collection form submission
 async function handleCollectionSubmit(event) {
     event.preventDefault();
@@ -118,6 +154,12 @@ async function handleCollectionSubmit(event) {
         firestoreCollection: formData.get('firestoreCollection'),
         storagePrefix: formData.get('storagePrefix')
     };
+    
+    // Add function to navigate to a specific collection view
+    function viewCollection(collectionName) {
+        if (!collectionName) return;
+        window.location.href = `/view_cards.html?collectionName=${encodeURIComponent(collectionName)}`;
+    }
     
     try {
         const response = await fetch(ENDPOINTS.ADD_COLLECTION, {

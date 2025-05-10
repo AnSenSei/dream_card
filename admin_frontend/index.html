@@ -15,7 +15,7 @@
             <a href="view_packs.html" class="nav-link">View Packs</a>
             <a href="admin_collections.html" class="nav-link">Manage Collections</a>
         </div>
-        <form id="uploadForm">
+        <form id="uploadForm" action="/gacha/api/v1/storage/upload_card" method="POST" enctype="multipart/form-data">
             <div>
                 <label for="card_name">Card Name:</label>
                 <input type="text" id="card_name" name="card_name" required>
@@ -38,10 +38,14 @@
             </div>
             <div>
                 <label for="collection_metadata_id">Collection:</label>
-                <select id="collection_metadata_id" name="collection_metadata_id">
+                <select id="collection_metadata_id" name="collection_metadata_id" required>
                     <option value="">-- Select Collection --</option>
                     <!-- Options will be populated by JavaScript -->
                 </select>
+                <!-- Debug information display -->
+                <div id="collection-debug" style="font-size: 0.8em; color: #666; margin-top: 5px;"></div>
+                <!-- Hidden field as backup for collection -->
+                <input type="hidden" id="collection_backup" name="collection_metadata_id">
             </div>
             <div>
                 <label for="image_file">Card Image:</label>

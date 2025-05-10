@@ -1,7 +1,125 @@
 document.addEventListener('DOMContentLoaded', () => {
+    // Initialize variables
     const uploadForm = document.getElementById('uploadForm');
     const messageDiv = document.getElementById('message');
     const collectionDropdown = document.getElementById('collection_metadata_id');
+    let fetchedCollections = []; // Store fetched collections for later use
+
+    // Fetch collections for dropdown
+    fetch('/gacha/api/v1/storage/collection-metadata')
+        .then(response => response.json())
+        .then(collections => {
+            console.log('Fetched collections:', collections);
+            fetchedCollections = collections; // Store for later use
+
+            // Clear current options except the default one
+            while (collectionDropdown.options.length > 1) {
+                collectionDropdown.remove(1);
+            }
+
+            // Add each collection to the dropdown
+            collections.forEach(collection => {
+                const option = document.createElement('option');
+                option.value = collection.name;
+                option.textContent = collection.name;
+                collectionDropdown.appendChild(option);
+                console.log(`Added option: ${collection.name} with value: ${collection.name}`);
+            });
+
+            console.log('Collection dropdown populated with options. Current value:', collectionDropdown.value);
+
+            // Add event listener to the dropdown to debug selection changes
+            collectionDropdown.addEventListener('change', function() {
+                console.log('Collection dropdown value changed to:', this.value);
+            });
+
+            // Set a default collection if none selected (for testing)
+            if (collections.length > 0 && !collectionDropdown.value) {
+                console.log("Setting a default collection for testing:", collections[0].name);
+                collectionDropdown.value = collections[0].name;
+
+                // Trigger the change event
+                const event = new Event('change');
+                collectionDropdown.dispatchEvent(event);
+            }
+        })
+        .catch(error => {
+            console.error('Error fetching collections:', error);
+        });
+
+    // Handle form submission
+    if (uploadForm) {
+        // Additional check to ensure collection is properly set
+        uploadForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            // Show loading message
+            messageDiv.innerHTML = '<p class="info">Uploading card...</p>';
+
+            // Ensure the collection is properly included by setting both fields
+            const selectedCollection = collectionDropdown.value;
+            document.getElementById('collection_backup').value = selectedCollection;
+
+            console.log('Form submitted. Collection dropdown value:', selectedCollection);
+            console.log('Collection backup field value:', document.getElementById('collection_backup').value);
+
+            // Create a new FormData object directly from the form
+            const formData = new FormData(uploadForm);
+
+            // Explicitly add collection_metadata_id to ensure it's included
+            if (collectionDropdown.value) {
+                console.log("Adding collection_metadata_id:", collectionDropdown.value);
+                // Remove any existing value first
+                formData.delete('collection_metadata_id');
+                // Add as form field, not as URL parameter
+                formData.append('collection_metadata_id', collectionDropdown.value);
+                console.log("Added collection_metadata_id to form data");
+            } else {
+                console.warn("No collection selected, will use default collection");
+            }
+
+            // Debug FormData contents before submission
+            console.log("Form data contents before submission:");
+            for (let pair of formData.entries()) {
+                console.log(`${pair[0]}: ${pair[1]}`);
+            }
+
+            // Make the API request with ONLY form data, no URL parameters
+            // Use the backendUrl variable defined at the top of the script
+            console.log("Submitting to URL:", backendUrl);
+            
+            fetch(backendUrl, {
+                method: 'POST',
+                body: formData,
+                // Do not set Content-Type header - browser sets it with boundary
+                // Don't set Content-Type header - browser sets it automatically with boundary
+            })
+            .then(response => {
+                console.log("Response status:", response.status);
+                if (!response.ok) {
+                    if (response.status === 405) {
+                        throw new Error('Method Not Allowed: This endpoint only accepts POST requests');
+                    }
+                    return response.json().then(errData => {
+                        throw new Error(errData.detail || 'Upload failed');
+                    }).catch(err => {
+                        // In case the response doesn't have a valid JSON body
+                        throw new Error(`Upload failed with status ${response.status}`);
+                    });
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('Card uploaded successfully:', data);
+                messageDiv.innerHTML = '<p class="success">Card uploaded successfully!</p>';
+                uploadForm.reset();
+            })
+            .catch(error => {
+                console.error('Error uploading card:', error);
+                messageDiv.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+            });
+        });
+    }
 
     // Use the full backend URL including the scheme, host, port, and full path
     const backendUrl = 'http://localhost:8080/gacha/api/v1/storage/upload_card';
@@ -13,71 +131,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Fetch collection metadata and populate dropdown
     fetchCollections(collectionMetadataIdFromUrl);
-
-    uploadForm.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        messageDiv.textContent = '';
-        messageDiv.className = '';
-
-        const formData = new FormData();
-        formData.append('card_name', document.getElementById('card_name').value);
-        formData.append('rarity', document.getElementById('rarity').value);
-        formData.append('point_worth', document.getElementById('point_worth').value);
-        formData.append('quantity', document.getElementById('quantity').value);
-        formData.append('date_got_in_stock', document.getElementById('date_got_in_stock').value);
-
-        // Add collection metadata ID if provided
-        const collectionMetadataId = document.getElementById('collection_metadata_id').value;
-        console.log('Collection dropdown value:', collectionMetadataId);
-
-        // Prepare the URL with the collection_metadata_id as a query parameter if provided
-        let uploadUrl = backendUrl;
-        if (collectionMetadataId) {
-            uploadUrl = `${backendUrl}?collection_metadata_id=${encodeURIComponent(collectionMetadataId)}`;
-            console.log('Sending collection_metadata_id as query parameter:', collectionMetadataId);
-            console.log('Upload URL with collection_metadata_id:', uploadUrl);
-        }
-
-        const imageFile = document.getElementById('image_file').files[0];
-        if (!imageFile) {
-            messageDiv.textContent = 'Please select an image file.';
-            messageDiv.className = 'error';
-            return;
-        }
-        formData.append('image_file', imageFile);
-
-        try {
-            const response = await fetch(uploadUrl, {
-                method: 'POST',
-                body: formData, // FormData will set the Content-Type to multipart/form-data automatically
-            });
-
-            const result = await response.json();
-
-            if (response.ok) {
-                messageDiv.textContent = 'Card uploaded successfully! Card Name: ' + result.card_name + ', Image URL: ' + result.image_url;
-                messageDiv.className = 'success';
-                uploadForm.reset();
-            } else {
-                let errorMessage = 'Error uploading card.';
-                if (result.detail) {
-                    if (typeof result.detail === 'string') {
-                        errorMessage += ' Server says: ' + result.detail;
-                    } else if (Array.isArray(result.detail)) { // Handle FastAPI validation errors
-                        errorMessage += ' Details: ' + result.detail.map(err => `Field: ${err.loc[1]}, Message: ${err.msg}`).join('; ');
-                    } else if (typeof result.detail === 'object'){
-                        errorMessage += ' Server says: ' + JSON.stringify(result.detail);
-                    }
-                }
-                messageDiv.textContent = errorMessage;
-                messageDiv.className = 'error';
-            }
-        } catch (error) {
-            console.error('Upload error:', error);
-            messageDiv.textContent = 'An unexpected error occurred. Check the console for details.';
-            messageDiv.className = 'error';
-        }
-    });
 
     // Function to fetch collection metadata and populate dropdown
     async function fetchCollections(selectedCollectionId = null) {

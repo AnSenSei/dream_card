@@ -4,6 +4,11 @@ console.log("collection.js loaded");
 // In a real application, card collection data would be fetched from a backend
 // or managed using localStorage for a simple frontend-only toy.
 
+// Initialize the card editing feature when DOM is loaded
+document.addEventListener('DOMContentLoaded', function() {
+    enableCardNameEditing();
+});
+
 // API endpoints
 const API_BASE_URL = 'http://localhost:8080/gacha/api/v1/storage';
 const ENDPOINTS = {
@@ -145,6 +150,112 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log('Modal should be visible now with class "show"');
     }
 
+    // Enable card name click-to-edit feature
+    function enableCardNameEditing() {
+        document.addEventListener('click', function(event) {
+            // Check if the clicked element is a card name
+            if (event.target.classList.contains('card-name')) {
+                const cardId = event.target.closest('.card-item').dataset.cardId;
+                openEditModal(cardId);
+            }
+        });
+    }
+    
+    // Open edit modal and populate with card data
+    function openEditModal(cardId) {
+        const card = currentCards.find(card => card.id === cardId);
+        if (!card) return;
+        
+        // Populate the edit form with card data
+        const form = document.getElementById('edit-card-form');
+        form.querySelector('input[name="card-id"]').value = card.id;
+        form.querySelector('input[name="card-name"]').value = card.card_name;
+        form.querySelector('input[name="card-rarity"]').value = card.rarity;
+        form.querySelector('input[name="card-points"]').value = card.point_worth;
+        form.querySelector('input[name="card-quantity"]').value = card.quantity;
+        form.querySelector('input[name="card-date"]').value = card.date_got_in_stock;
+        
+        // Set the collection name if available
+        const collectionNameInput = form.querySelector('input[name="edit-collection-name"]');
+        if (collectionNameInput && currentCollection) {
+            collectionNameInput.value = currentCollection;
+        }
+        
+        // Show the modal
+        const modal = document.getElementById('edit-card-modal');
+        modal.style.display = 'block';
+    }
+    
+    // Close the edit modal
+    function closeModal() {
+        const modal = document.getElementById('edit-card-modal');
+        if (modal) modal.style.display = 'none';
+    }
+    
+    // Display success message
+    function displaySuccess(message) {
+        // Check if notification container exists, create if not
+        let notificationContainer = document.getElementById('notification-container');
+        if (!notificationContainer) {
+            notificationContainer = document.createElement('div');
+            notificationContainer.id = 'notification-container';
+            notificationContainer.style.position = 'fixed';
+            notificationContainer.style.top = '20px';
+            notificationContainer.style.right = '20px';
+            notificationContainer.style.zIndex = '1000';
+            document.body.appendChild(notificationContainer);
+        }
+        
+        const notification = document.createElement('div');
+        notification.className = 'notification success';
+        notification.innerHTML = message;
+        notification.style.backgroundColor = '#4CAF50';
+        notification.style.color = 'white';
+        notification.style.padding = '10px';
+        notification.style.marginBottom = '10px';
+        notification.style.borderRadius = '4px';
+        notification.style.boxShadow = '0 2px 4px rgba(0,0,0,0.2)';
+        
+        notificationContainer.appendChild(notification);
+        
+        // Remove notification after 3 seconds
+        setTimeout(() => {
+            notification.remove();
+        }, 3000);
+    }
+    
+    // Display error message
+    function displayError(message) {
+        // Check if notification container exists, create if not
+        let notificationContainer = document.getElementById('notification-container');
+        if (!notificationContainer) {
+            notificationContainer = document.createElement('div');
+            notificationContainer.id = 'notification-container';
+            notificationContainer.style.position = 'fixed';
+            notificationContainer.style.top = '20px';
+            notificationContainer.style.right = '20px';
+            notificationContainer.style.zIndex = '1000';
+            document.body.appendChild(notificationContainer);
+        }
+        
+        const notification = document.createElement('div');
+        notification.className = 'notification error';
+        notification.innerHTML = message;
+        notification.style.backgroundColor = '#f44336';
+        notification.style.color = 'white';
+        notification.style.padding = '10px';
+        notification.style.marginBottom = '10px';
+        notification.style.borderRadius = '4px';
+        notification.style.boxShadow = '0 2px 4px rgba(0,0,0,0.2)';
+        
+        notificationContainer.appendChild(notification);
+        
+        // Remove notification after 3 seconds
+        setTimeout(() => {
+            notification.remove();
+        }, 3000);
+    }
+    
     async function updateCard(formData) {
         const cardId = formData.get('card-id');
         const collectionName = formData.get('edit-collection-name');

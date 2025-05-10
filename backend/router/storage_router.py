@@ -29,8 +29,8 @@ async def upload_card_endpoint(
     point_worth: Annotated[int, Form()],
     date_got_in_stock: Annotated[str, Form()],
     quantity: Annotated[int, Form()] = 0,
-    collection_metadata_id: str | None = Form(None),  # Change to Form parameter to ensure it's properly received
-    collectionName: str | None = Form(None)  # Keep for backward compatibility, also as Form param
+    collection_metadata_id: str | None = Form(None),  # IMPORTANT: Must be sent as form data, not URL parameter
+    # Keep for backward compatibility, also as Form param
 ):
     """
     Endpoint to upload a card image and its information.
@@ -40,14 +40,20 @@ async def upload_card_endpoint(
     - **point_worth**: How many points the card is worth.
     - **date_got_in_stock**: Date the card was acquired.
     - **quantity**: Number of cards in stock (defaults to 0).
-    - **collection_metadata_id** (form field, optional): The ID of the collection metadata to use.
-    - **collectionName** (form field, optional): The Firestore collection to target (deprecated, use collection_metadata_id instead).
+    - **collection_metadata_id** (FORM FIELD, optional): The ID of the collection metadata to use. 
+       MUST be submitted as a form field, not as a URL parameter.
+    
+    NOTE: When adding cards to a collection via admin_frontend, ensure collection_metadata_id is included in the form data.
     """
-    # For backward compatibility, use collectionName if collection_metadata_id is not provided
-    effective_collection_metadata_id = collection_metadata_id if collection_metadata_id is not None else collectionName
+
+    effective_collection_metadata_id = collection_metadata_id
 
     logger.info(f"Received request to upload card: {card_name}. Collection metadata ID: {effective_collection_metadata_id if effective_collection_metadata_id else 'default'}")
-    logger.info(f"Original collection_metadata_id: {collection_metadata_id}, collectionName: {collectionName}")
+
+    
+    # Debug all request form fields
+    logger.info(f"Form field collection_metadata_id: {collection_metadata_id!r}")
+    logger.info(f"Form field collection_metadata_id type: {type(collection_metadata_id)}")
     
     # Validate that at least one collection parameter has a value if using custom collections
     if effective_collection_metadata_id is not None and not effective_collection_metadata_id.strip():
@@ -77,7 +83,7 @@ async def upload_card_endpoint(
 
 @router.get("/cards", response_model=CardListResponse)
 async def get_all_cards_endpoint(
-    collectionName: str | None = None, 
+    collectionName: str | None = Query("one_piece", description="Collection name to retrieve cards from"),
     page: int = Query(1, ge=1, description="Page number to retrieve"),
     per_page: int = Query(10, ge=1, le=100, description="Number of items per page"),
     sort_by: str = Query("point_worth", description="Field to sort by (e.g., point_worth, card_name, date_got_in_stock, quantity, rarity)"),
