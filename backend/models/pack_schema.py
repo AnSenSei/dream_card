@@ -19,6 +19,7 @@ class CardPack(BaseModel):
     id: str
     name: str
     image_url: Optional[str] = None
+    win_rate: Optional[int] = None
 
 class AddPackRequest(BaseModel):
     """
@@ -27,6 +28,7 @@ class AddPackRequest(BaseModel):
     pack_name: str
     rarities_config: Dict[str, RarityDetail]
     collection_id: str
+    win_rate: Optional[int] = None
 
 class CardInPack(BaseModel):
     """
@@ -71,6 +73,7 @@ class UpdatePackRequest(BaseModel):
     pack_name: Optional[str] = None
     description: Optional[str] = None
     rarities: Optional[Dict[str, RarityDetail]] = None # Changed from Dict[str, Dict[str, Any]]
+    win_rate: Optional[int] = None
     
 class UpdateRarityProbabilityRequest(BaseModel):
     """
@@ -111,3 +114,15 @@ class DeleteRarityRequest(BaseModel):
     This model is currently empty as the rarity ID is passed in the URL path.
     """
     pass
+
+class AddCardToRarityRequest(BaseModel):
+    """
+    Request model for adding a card to a rarity in a pack.
+    This card will be stored as a document under /packs/{packId}/rarities/{rarityId}/cards/{cardId}
+    
+    Fields:
+    - collection_metadata_id: The ID of the collection metadata for fetching card details
+    - document_id: The ID of the card to add (card name)
+    """
+    collection_metadata_id: str
+    document_id: str

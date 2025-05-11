@@ -9,7 +9,9 @@ from models.pack_schema import (
     AddCardToPackRequest,
     UpdateRarityProbabilityRequest,
     AddRarityRequest,
-    DeleteRarityRequest
+    DeleteRarityRequest,
+    AddCardToRarityRequest,
+    DeleteCardFromRarityRequest
 )
 from service.packs_service import (
     create_pack_in_firestore,
@@ -20,7 +22,10 @@ from service.packs_service import (
     add_card_from_storage_to_pack,
     update_rarity_probability,
     add_rarity_with_probability,
-    delete_rarity
+    delete_rarity,
+    get_packs_collection_from_firestore,
+    add_card_to_rarity,
+    delete_card_from_rarity
 )
 from config import get_firestore_client, get_storage_client, settings, get_logger
 from google.cloud import firestore, storage
@@ -38,6 +43,23 @@ router = APIRouter(
 async def list_packs_route(db: firestore.AsyncClient = Depends(get_firestore_client)):
     """Lists all available card packs from Firestore."""
     return await get_all_packs_from_firestore(db)
+
+@router.get("/collection/{collection_id}", response_model=List[CardPack])
+async def get_packs_in_collection_route(
+    collection_id: str,
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Lists all packs under a specific collection in Firestore.
+    
+    Args:
+        collection_id: The ID of the collection to get packs from
+        db: Firestore client dependency
+    
+    Returns:
+        List of card packs in the collection
+    """
+    return await get_packs_collection_from_firestore(collection_id, db)
 
 @router.get("/{pack_id}", response_model=CardPack)
 async def get_pack_details_route(
@@ -60,6 +82,7 @@ async def add_pack_route(
     pack_name: str = Form(...),
     rarities_config_str: str = Form(...),
     collection_id: str = Form(...),
+    win_rate: Optional[int] = Form(None),
     db: firestore.AsyncClient = Depends(get_firestore_client),
     storage_client: storage.Client = Depends(get_storage_client),
     image_file: Optional[UploadFile] = File(None)
@@ -93,6 +116,7 @@ async def add_pack_route(
             pack_name=pack_name,
             rarities_config=parsed_rarities_config,
             collection_id=collection_id,
+            win_rate=win_rate
         )
 
         pack_id = await create_pack_in_firestore(pack_request_model, db, storage_client, image_file)
@@ -201,4 +225,61 @@ async def delete_rarity_route(
     except Exception as e:
         logger.error(f"Unhandled error in delete_rarity_route: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while deleting the rarity.")
+    
+@router.post("/{collection_id}/{pack_id}/rarities/{rarity_id}/cards", response_model=Dict[str, str], status_code=201)
+async def add_card_to_rarity_route(
+    collection_id: str,
+    pack_id: str,
+    rarity_id: str,
+    request: AddCardToRarityRequest,
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Adds a card to the cards subcollection within a specific rarity in a pack.
+    
+    The card information is fetched from the storage service using the collection_metadata_id
+    and document_id provided in the request.
+    
+    The card is stored as a document under /packs/{collection_id}/{packId}/rarities/{rarityId}/cards/{cardId}
+    with the following fields:
+    - globalRef: Reference to the global card document (DocumentReference)
+    - name: Card name
+    - quantity: Card quantity (updated after each draw)
+    - point: Card point value (updated after each draw)
+    
+    Args:
+        collection_id: The ID of the pack collection containing the pack
+        pack_id: The ID of the pack to add the card to
+        rarity_id: The ID of the rarity to add the card to
+        request: AddCardToRarityRequest containing collection_metadata_id and document_id
+        db: Firestore client dependency
+        
+    Returns:
+        Dictionary with success message
+    """
+    try:
+        # Pass the collection_id as part of the pack_id path parameter
+        # Format: collection_id/pack_id
+        pack_path = f"{collection_id}/{pack_id}"
+        
+        await add_card_to_rarity(
+            collection_metadata_id=request.collection_metadata_id,
+            document_id=request.document_id,
+            pack_id=pack_path,
+            rarity_id=rarity_id,
+            db_client=db
+        )
+        return {
+            "message": f"Successfully added card '{request.document_id}' to rarity '{rarity_id}' in pack '{pack_id}' in collection '{collection_id}'",
+            "card_id": request.document_id,
+            "rarity_id": rarity_id,
+            "pack_id": pack_id,
+            "collection_id": collection_id
+        }
+    except HTTPException:
+        # Re-raise HTTPExceptions from the service layer
+        raise
+    except Exception as e:
+        logger.error(f"Unhandled error in add_card_to_rarity_route: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred while adding the card to the rarity.")
     

@@ -196,6 +196,7 @@ async def create_pack_in_firestore(
 
     pack_name = pack_data.pack_name
     collection_id = pack_data.collection_id
+    win_rate = pack_data.win_rate
 
     if not pack_name:
         raise HTTPException(status_code=400, detail="Pack name cannot be empty.")
@@ -262,7 +263,8 @@ async def create_pack_in_firestore(
         pack_doc_data = {
             "name": pack_name,
             "id": pack_id,
-            "created_at": firestore.SERVER_TIMESTAMP
+            "created_at": firestore.SERVER_TIMESTAMP,
+            "win_rate": win_rate,
         }
         if image_gcs_uri_for_firestore:
             pack_doc_data["image_url"] = image_gcs_uri_for_firestore
@@ -327,6 +329,71 @@ async def get_all_packs_from_firestore(db_client: firestore.AsyncClient) -> List
     except Exception as e:
         logger.error(f"Error fetching all packs from Firestore: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Could not retrieve packs from database.")
+
+async def get_packs_collection_from_firestore(collection_id: str, db_client: firestore.AsyncClient) -> List[CardPack]:
+    """
+    Fetches all packs from a specific collection in Firestore.
+    Generates signed URLs for pack images if available.
+    
+    Args:
+        collection_id: The ID of the collection to fetch packs from
+        db_client: Firestore client
+        
+    Returns:
+        List[CardPack]: List of packs in the collection
+        
+    Raises:
+        HTTPException: If collection not found or on database error
+    """
+    logger.info(f"Fetching all packs from collection '{collection_id}' in Firestore.")
+    packs_list = []
+    
+    try:
+        # Check if the collection exists
+        collection_ref = db_client.collection('packs').document(collection_id)
+        collection_doc = await collection_ref.get()
+        
+        if not collection_doc.exists:
+            logger.warning(f"Collection '{collection_id}' not found in Firestore.")
+            raise HTTPException(status_code=404, detail=f"Collection '{collection_id}' not found")
+            
+        # Get all packs in the collection
+        packs_ref = collection_ref.collection(collection_id)
+        packs_stream = packs_ref.stream()
+        
+        async for pack_doc in packs_stream:
+            pack_data = pack_doc.to_dict()
+            pack_id = pack_doc.id
+            pack_data['id'] = pack_id
+            
+            pack_name = pack_data.get('name', pack_id)
+            
+            # Generate signed URL if GCS URI exists
+            image_url = pack_data.get('image_url')
+            signed_image_url = None
+            if image_url and image_url.startswith('gs://'):
+                signed_image_url = await generate_signed_url(image_url)
+            elif image_url:
+                signed_image_url = image_url
+                
+            # Create CardPack object
+            pack = CardPack(
+                id=pack_id,
+                name=pack_name,
+                image_url=signed_image_url,
+                win_rate=pack_data.get('win_rate')
+            )
+            packs_list.append(pack)
+            
+        logger.info(f"Successfully fetched {len(packs_list)} packs from collection '{collection_id}'.")
+        return packs_list
+        
+    except HTTPException:
+        # Re-raise HTTPExceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching packs from collection '{collection_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not retrieve packs from collection '{collection_id}'.")
 
 async def get_pack_by_id_from_firestore(
     pack_id: str, 
@@ -564,6 +631,126 @@ async def add_card_from_storage_to_pack(
     except Exception as e:
         logger.error(f"Error adding card to pack: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to add card to pack: {str(e)}")
+
+async def add_card_to_rarity(
+    collection_metadata_id: str,
+    document_id: str,
+    pack_id: str,
+    rarity_id: str,
+    db_client: AsyncClient
+) -> bool:
+    """
+    Adds a card under the cards subcollection within a specific rarity in a pack.
+    Fetches card details from storage_service using the provided document_id and collection_metadata_id.
+    
+    Args:
+        collection_metadata_id: The ID of the collection metadata to use for fetching card
+        document_id: The ID of the card to add
+        pack_id: The ID of the pack to add the card to (can include collection_id, formatted as 'collection_id/pack_id')
+        rarity_id: The ID of the rarity to add the card to
+        db_client: Firestore client
+        
+    Returns:
+        bool: True if successfully added
+        
+    Raises:
+        HTTPException: If pack or rarity doesn't exist, or if card fetch fails, or other errors
+    """
+    from service.storage_service import get_card_by_id
+    
+    try:
+        # Parse the pack_id which may include collection_id (format: 'collection_id/pack_id')
+        parts = pack_id.split('/')
+        
+        if len(parts) == 2:
+            # If pack_id includes collection_id (collection_id/pack_id format)
+            collection_id, actual_pack_id = parts
+            logger.info(f"Parsed pack_id '{pack_id}' into collection_id='{collection_id}' and pack_id='{actual_pack_id}'")
+            
+            # Construct the reference to the pack document
+            pack_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(actual_pack_id)
+        else:
+            # If just a simple pack_id
+            logger.warning(f"No collection_id found in pack_id '{pack_id}', using it directly as document ID")
+            pack_ref = db_client.collection('packs').document(pack_id)
+        
+        # Check if pack exists
+        pack_snap = await pack_ref.get()
+        if not pack_snap.exists:
+            logger.error(f"Pack not found: {pack_id}")
+            raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
+        
+        # Check if rarity exists
+        rarity_ref = pack_ref.collection('rarities').document(rarity_id)
+        rarity_snap = await rarity_ref.get()
+        if not rarity_snap.exists:
+            logger.error(f"Rarity '{rarity_id}' not found in pack '{pack_id}'")
+            raise HTTPException(status_code=404, detail=f"Rarity '{rarity_id}' not found in pack '{pack_id}'")
+        
+        # Fetch card information from storage_service
+        try:
+            card_info = await get_card_by_id(document_id, collection_name=collection_metadata_id)
+        except HTTPException as e:
+            logger.error(f"Failed to fetch card '{document_id}' from collection '{collection_metadata_id}': {str(e)}")
+            raise HTTPException(
+                status_code=e.status_code, 
+                detail=f"Failed to fetch card details: {e.detail}"
+            )
+        
+        # Create global card reference using the actual collection path from collection_metadata_id
+        # The actual path comes from the collection metadata's firestoreCollection
+        from service.storage_service import get_collection_metadata
+        
+        try:
+            metadata = await get_collection_metadata(collection_metadata_id)
+            global_card_collection = metadata.firestoreCollection
+            logger.info(f"Using metadata firestoreCollection path: '{global_card_collection}'")
+        except HTTPException as e:
+            # Default to collection_metadata_id if metadata not found
+            global_card_collection = collection_metadata_id
+            logger.warning(f"Metadata for '{collection_metadata_id}' not found, using it directly: '{global_card_collection}'")
+            
+        global_card_ref = db_client.collection(global_card_collection).document(document_id)
+        
+        # Prepare card data for the subcollection
+        card_doc_data = {
+            "globalRef": global_card_ref,
+            "name": card_info.card_name,
+            "quantity": card_info.quantity,
+            "point": card_info.point_worth
+        }
+        
+        # Add image_url if available
+        if hasattr(card_info, 'image_url') and card_info.image_url:
+            card_doc_data["image_url"] = card_info.image_url
+        
+        # Add card to the cards subcollection under the rarity
+        card_ref = rarity_ref.collection('cards').document(document_id)
+        await card_ref.set(card_doc_data)
+        
+        # Now update the rarity document to include this card in its cards array
+        rarity_data = rarity_snap.to_dict()
+        data_field = rarity_data.get('data', {})
+        cards_array = data_field.get('cards', [])
+        
+        # Add the card ID to the array if it's not already there
+        if document_id not in cards_array:
+            cards_array.append(document_id)
+            await rarity_ref.set({
+                'data': {
+                    **data_field,
+                    'cards': cards_array
+                }
+            }, merge=True)
+        
+        logger.info(f"Successfully added card '{document_id}' to rarity '{rarity_id}' in pack '{pack_id}'")
+        return True
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error adding card to rarity: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add card to rarity: {str(e)}")
+
 
 async def update_pack_in_firestore(
     pack_id: str, 
