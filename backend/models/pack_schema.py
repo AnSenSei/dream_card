@@ -19,18 +19,36 @@ class CardPack(BaseModel):
     id: str
     name: str
     image_url: Optional[str] = None
-    description: Optional[str] = None 
-    rarity_configurations: Optional[Dict[str, Dict[str, Any]]] = None 
-    # Example of what might be compiled if needed for a detailed pack view:
-    # rarity_probabilities: Optional[Dict[str, float]] = None
-    # cards_by_rarity: Optional[Dict[str, List[str]]] = None 
 
 class AddPackRequest(BaseModel):
     """
     Request model for creating a new card pack.
     """
     pack_name: str
-    rarities_config: Dict[str, RarityDetail] 
+    rarities_config: Dict[str, RarityDetail]
+    collection_id: str
+
+class CardInPack(BaseModel):
+    """
+    Represents a card added to a specific rarity in a pack.
+    This is stored as a document under /packs/{packId}/rarities/{rarityId}/cards/{cardId}
+    """
+    name: str
+    quantity: Optional[int] = 0
+    point: Optional[int] = 0
+    image_url: Optional[str] = None
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+class AddCardToPackRequest(BaseModel):
+    """
+    Request model for adding a card to a specific rarity in a pack.
+    """
+    name: str
+    quantity: Optional[int] = 0
+    point: Optional[int] = 0
+    image_url: Optional[str] = None
 
 class UpdatePackRequest(BaseModel):
     """
@@ -53,3 +71,43 @@ class UpdatePackRequest(BaseModel):
     pack_name: Optional[str] = None
     description: Optional[str] = None
     rarities: Optional[Dict[str, RarityDetail]] = None # Changed from Dict[str, Dict[str, Any]]
+    
+class UpdateRarityProbabilityRequest(BaseModel):
+    """
+    Request model for updating the probability of a specific rarity in a card pack.
+    
+    Fields:
+    - probability: New probability value for the rarity (0.0 to 1.0)
+    """
+    probability: float
+
+class AddRarityRequest(BaseModel):
+    """
+    Request model for adding a new rarity with probability to a card pack.
+    
+    Fields:
+    - rarity_name: Name of the new rarity
+    - probability: Probability value for the rarity (0.0 to 1.0)
+    """
+    rarity_id: str
+    probability: float
+
+class CollectionPackRarityParams(BaseModel):
+    """
+    Model for specifying the path parameters for accessing a rarity within a pack collection.
+    
+    Fields:
+    - collection_id: ID of the pack collection
+    - pack_id: ID of the pack
+    - rarity_id: ID of the rarity
+    """
+    collection_id: str
+    pack_id: str
+    rarity_id: str
+
+class DeleteRarityRequest(BaseModel):
+    """
+    Request model for deleting a rarity from a card pack.
+    This model is currently empty as the rarity ID is passed in the URL path.
+    """
+    pass
