@@ -10,7 +10,9 @@ from service.storage_service import (
     delete_card_from_firestore,
     add_collection_metadata,
     get_collection_metadata,
-    get_all_collection_metadata
+    get_all_collection_metadata,
+    get_card_by_id,
+
 )
 from config import get_logger
 
@@ -121,21 +123,44 @@ async def get_all_cards_endpoint(
         logger.error(f"Unexpected error in get_all_cards_endpoint: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while fetching cards: {str(e)}")
 
+
+@router.get("/cards/{document_id}", response_model=StoredCardInfo)
+async def get_card_by_id_endpoint(
+    document_id: str,
+    collection_metadata_id: str
+):
+    """
+    Retrieve a specific card by its document ID.
+    - **document_id**: The Firestore document ID of the card.
+    - **collectionName** (query param, optional): The Firestore collection to target.
+    """
+    logger.info(f"Received request to get card {document_id}. Collection: {collection_metadata_id if collection_metadata_id else 'default'}")
+    try:
+        card = await get_card_by_id(document_id, collection_name=collection_metadata_id)
+        return card
+    except HTTPException as e:
+        logger.error(f"HTTPException in get_card_by_id_endpoint for {document_id}: {e.detail}")
+        raise e
+    except Exception as e:
+        logger.error(f"Unexpected error in get_card_by_id_endpoint for {document_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred retrieving card: {str(e)}")
+
+
 @router.patch("/cards/{document_id}/quantity", response_model=StoredCardInfo)
 async def update_card_quantity_endpoint(
     document_id: str,
     request: UpdateQuantityRequest,
-    collectionName: str | None = None
+    collection_metadata_id: str
 ):
     """
     Update the quantity of a card by adding or subtracting the specified amount.
     - **document_id**: The Firestore document ID of the card
     - **request.quantity_change**: The amount to change the quantity by (positive to add, negative to subtract)
-    - **collectionName** (query param, optional): The Firestore collection to target.
+    - **request.collectionName** (optional): The Firestore collection to target.
     """
-    logger.info(f"Received request to update quantity for card {document_id} by {request.quantity_change}. Collection: {collectionName if collectionName else 'default'}")
+    logger.info(f"Received request to update quantity for card {document_id} by {request.quantity_change}. Collection: {collection_metadata_id if collection_metadata_id else 'default'}")
     try:
-        updated_card = await update_card_quantity(document_id, request.quantity_change, collection_name=collectionName)
+        updated_card = await update_card_quantity(document_id, request.quantity_change, collection_name=collection_metadata_id)
         return updated_card
     except HTTPException as e:
         logger.error(f"HTTPException in update_card_quantity_endpoint for {document_id}: {e.detail}")
@@ -148,7 +173,7 @@ async def update_card_quantity_endpoint(
 async def update_card_endpoint(
     document_id: str,
     card_update: UpdateCardRequest,
-    collectionName: str | None = None
+    collection_metadata_id: str
 ):
     """
     Update card information.
@@ -156,14 +181,14 @@ async def update_card_endpoint(
     - **card_update**: The fields to update (only provided fields will be updated)
     - **collectionName** (query param, optional): The Firestore collection to target.
     """
-    logger.info(f"Received request to update card {document_id}. Collection: {collectionName if collectionName else 'default'}")
+    logger.info(f"Received request to update card {document_id}. Collection: {collection_metadata_id if collection_metadata_id else 'default'}")
     try:
         # Convert Pydantic model to dict, excluding None values
         update_data = {k: v for k, v in card_update.model_dump().items() if v is not None}
         if not update_data:
             raise HTTPException(status_code=400, detail="No update data provided")
 
-        updated_card = await update_card_information(document_id, update_data, collection_name=collectionName)
+        updated_card = await update_card_information(document_id, update_data, collection_name=collection_metadata_id)
         return updated_card
     except HTTPException as e:
         logger.error(f"HTTPException in update_card_endpoint for {document_id}: {e.detail}")
@@ -174,17 +199,16 @@ async def update_card_endpoint(
 
 @router.delete("/cards/{document_id}", status_code=204) # 204 No Content is typical for successful DELETE
 async def delete_card_endpoint(
-    document_id: str,
-    collectionName: str | None = None
+        document_id: str,
+        collection_metadata_id: str
 ):
     """
     Delete a card from Firestore.
     - **document_id**: The Firestore document ID of the card.
-    - **collectionName** (query param, optional): The Firestore collection to target.
+    - **collection_data.collectionName** (optional): The Firestore collection to target.
     """
-    logger.info(f"Received request to delete card {document_id}. Collection: {collectionName if collectionName else 'default'}")
     try:
-        await delete_card_from_firestore(document_id, collection_name=collectionName)
+        await delete_card_from_firestore(document_id, collection_name=collection_metadata_id)
         # No content to return, FastAPI handles the 204 response code
     except HTTPException as e:
         logger.error(f"HTTPException in delete_card_endpoint for {document_id}: {e.detail}")

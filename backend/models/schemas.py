@@ -34,19 +34,19 @@ class StoredCardInfo(BaseModel):
     card_name: str
     rarity: int
     point_worth: int
-    date_got_in_stock: str # Can use date or datetime if specific format is needed
+    date_got_in_stock: str  # Can use date or datetime if specific format is needed
     image_url: str
-    quantity: int = 0  # Default to 0 if not specified 
+    quantity: int = 0  # D
 
 class UpdateQuantityRequest(BaseModel):
     quantity_change: int 
 
 class UpdateCardRequest(BaseModel):
     card_name: Optional[str] = None
-    rarity: Optional[str] = None
+    rarity: Optional[int] = None
     point_worth: Optional[int] = None
     date_got_in_stock: Optional[str] = None
-    quantity: Optional[int] = None 
+    quantity: Optional[int] = None
 
 # --- Models for paginated card list response ---
 class PaginationInfo(BaseModel):

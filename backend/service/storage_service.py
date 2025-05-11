@@ -697,3 +697,67 @@ async def get_all_collections() -> List[CollectionMetadata]:
     Returns metadata for all collections from the metadata collection.
     """
     return await get_all_collection_metadata()
+
+async def get_card_by_id(document_id: str, collection_name: str | None = None) -> StoredCardInfo:
+    """
+    Retrieves all data for a specific card from Firestore by its ID.
+    If collection_name is provided, it fetches from that collection, otherwise defaults
+    to settings.firestore_collection_cards.
+
+    If collection_name is provided, it will look up the metadata for that collection
+    in the metadata collection and use the firestoreCollection for the Firestore collection.
+    
+    Returns:
+        StoredCardInfo: Complete data for the requested card
+    
+    Raises:
+        HTTPException: 404 if card not found, 500 for other errors
+    """
+    firestore_client = get_firestore_client()
+    
+    if not collection_name:
+        effective_collection_name = settings.firestore_collection_cards
+    else:
+        # Try to get the metadata for the collection
+        try:
+            metadata = await get_collection_metadata(collection_name)
+            effective_collection_name = metadata.firestoreCollection
+            logger.info(f"Using metadata for collection '{collection_name}': firestoreCollection='{effective_collection_name}'")
+        except HTTPException as e:
+            if e.status_code == 404:
+                # If metadata not found, use the provided collection_name as is
+                effective_collection_name = collection_name
+                logger.warning(f"Metadata for collection '{collection_name}' not found. Using provided collection_name as is.")
+            else:
+                # For other HTTP exceptions, re-raise
+                raise e
+    
+    doc_ref = firestore_client.collection(effective_collection_name).document(document_id)
+    
+    try:
+        doc = await doc_ref.get()
+        
+        if not doc.exists:
+            logger.warning(f"Card with ID {document_id} not found in collection '{effective_collection_name}'.")
+            raise HTTPException(status_code=404, detail=f"Card with ID {document_id} not found")
+            
+        # Get the card data and add the document ID
+        card_data = doc.to_dict()
+        card_data['id'] = document_id
+        
+        # Generate signed URL for the image if it's a GCS URI
+        if 'image_url' in card_data and card_data['image_url'].startswith('gs://'):
+            try:
+                card_data['image_url'] = await generate_signed_url(card_data['image_url'])
+                logger.debug(f"Generated signed URL for image: {card_data['image_url']}")
+            except Exception as sign_error:
+                logger.error(f"Failed to generate signed URL for {card_data['image_url']}: {sign_error}")
+                # Keep the original URL if signing fails
+        
+        return StoredCardInfo(**card_data)
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving card {document_id} from '{effective_collection_name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not retrieve card data from collection '{effective_collection_name}': {str(e)}")

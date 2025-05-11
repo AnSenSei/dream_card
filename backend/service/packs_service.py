@@ -10,12 +10,14 @@ from utils.gcs_utils import generate_signed_url
 
 from google.cloud.firestore_v1 import AsyncClient, ArrayUnion, ArrayRemove, Increment
 
+from config import settings
+
 # DB_PACKS import is removed as we are moving to Firestore for these functions
 # from service.data import DB_PACKS 
 
 logger = get_logger(__name__)
 
-GCS_BUCKET_NAME = "pack_covers"
+GCS_BUCKET_NAME = settings.PACKS_BUCKET
 
 async def create_pack_in_firestore(
     pack_data: AddPackRequest, 

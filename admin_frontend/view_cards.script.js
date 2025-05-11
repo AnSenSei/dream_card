@@ -69,22 +69,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (currentSearchQuery && currentSearchQuery.trim() !== '') {
                     queryParams.append('search_query', currentSearchQuery.trim());
                     clearSearchButton.style.display = 'inline-block';
+                    console.log(`Adding search query: ${currentSearchQuery.trim()}`);
                 } else {
                     clearSearchButton.style.display = 'none';
                 }
                 
                 const url = `${baseUrl}/cards?${queryParams.toString()}`;
                 console.log(`Fetching cards from: ${url}`);
-        if (currentSearchQuery && currentSearchQuery.trim() !== '') {
-            url += `&search_query=${encodeURIComponent(currentSearchQuery.trim())}`;
-            clearSearchButton.style.display = 'inline-block';
-        } else {
-            clearSearchButton.style.display = 'none';
-        }
-        
-        console.log(`Fetching cards from: ${url}`);
 
         try {
+            console.log(`Actually fetching from: ${url}`);
             const response = await fetch(url);
 
             if (!response.ok) {
@@ -156,8 +150,23 @@ document.addEventListener('DOMContentLoaded', async () => {
                                 <input type="number" class="quantity-input" placeholder="Set Qty">
                                 <button onclick="updateQuantityByInput('${card.id}', this.previousElementSibling.value, '${currentCollectionName || ''}')" class="quantity-btn">Set</button>
                             </div>
+                            <button class="view-details-btn">View Details</button>
                         </div>
                     `;
+                    // Add click event to show card details
+                    cardElement.addEventListener('click', function(event) {
+                        // Prevent click if user clicked on a button or input
+                        if (event.target.tagName === 'BUTTON' || event.target.tagName === 'INPUT') {
+                            return;
+                        }
+                        displayCardDetails(card);
+                    });
+                    // Add event listener for view details button
+                    const viewDetailsBtn = cardElement.querySelector('.view-details-btn');
+                    viewDetailsBtn.addEventListener('click', function() {
+                        displayCardDetails(card);
+                    });
+                    
                     cardDisplayArea.appendChild(cardElement);
                 });
                 // Safely access pagination details
@@ -183,6 +192,81 @@ document.addEventListener('DOMContentLoaded', async () => {
             displayError('Failed to load cards. ' + error.message);
         }
     }
+                
+                // Function to display card details when clicked
+                function displayCardDetails(card) {
+                    console.log('Displaying details for card:', card);
+                    
+                    // Create modal container
+                    const modal = document.createElement('div');
+                    modal.classList.add('card-detail-modal');
+                    modal.style.position = 'fixed';
+                    modal.style.top = '0';
+                    modal.style.left = '0';
+                    modal.style.width = '100%';
+                    modal.style.height = '100%';
+                    modal.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+                    modal.style.display = 'flex';
+                    modal.style.justifyContent = 'center';
+                    modal.style.alignItems = 'center';
+                    modal.style.zIndex = '1000';
+                    
+                    // Create modal content
+                    const modalContent = document.createElement('div');
+                    modalContent.classList.add('modal-content');
+                    modalContent.style.backgroundColor = '#fff';
+                    modalContent.style.borderRadius = '5px';
+                    modalContent.style.padding = '20px';
+                    modalContent.style.maxWidth = '600px';
+                    modalContent.style.width = '80%';
+                    modalContent.style.maxHeight = '80vh';
+                    modalContent.style.overflowY = 'auto';
+                    
+                    // Close button
+                    const closeButton = document.createElement('button');
+                    closeButton.textContent = 'X';
+                    closeButton.style.position = 'absolute';
+                    closeButton.style.top = '10px';
+                    closeButton.style.right = '10px';
+                    closeButton.style.backgroundColor = '#f44336';
+                    closeButton.style.color = 'white';
+                    closeButton.style.border = 'none';
+                    closeButton.style.borderRadius = '50%';
+                    closeButton.style.width = '30px';
+                    closeButton.style.height = '30px';
+                    closeButton.style.cursor = 'pointer';
+                    closeButton.addEventListener('click', () => {
+                        document.body.removeChild(modal);
+                    });
+                    
+                    // Card details content
+                    const cardDetailsHtml = `
+                        <h2>${card.card_name}</h2>
+                        ${card.image_url ? `<img src="${card.image_url}" alt="${card.card_name}" style="max-width: 100%; height: auto; margin-bottom: 15px;">` : ''}
+                        <div class="card-details-grid">
+                            <p><strong>Rarity:</strong> ${card.rarity || 'N/A'}</p>
+                            <p><strong>Point Worth:</strong> ${card.point_worth || 'N/A'}</p>
+                            <p><strong>Date In Stock:</strong> ${card.date_got_in_stock || 'N/A'}</p>
+                            <p><strong>Quantity:</strong> ${card.quantity || 0}</p>
+                            <p><strong>Card ID:</strong> ${card.id || 'N/A'}</p>
+                        </div>
+                    `;
+                    
+                    // Add content to modal
+                    modalContent.innerHTML = cardDetailsHtml;
+                    modalContent.appendChild(closeButton);
+                    modal.appendChild(modalContent);
+                    
+                    // Add modal to page
+                    document.body.appendChild(modal);
+                    
+                    // Close modal when clicking outside of it
+                    modal.addEventListener('click', (event) => {
+                        if (event.target === modal) {
+                            document.body.removeChild(modal);
+                        }
+                    });
+                } // Close displayCardDetails function
 
     function renderPaginationControls(paginationData) {
         paginationControlsTop.innerHTML = '';

@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     firestore_project_id: str = "seventh-program-433718-h8" # Use the actual Project ID
     firestore_collection_cards: str = "pokemon"
     meta_data_collection: str = "collection_meta_data"
+    PACKS_BUCKET:str =  "pack_covers"
     # Add other configurations here, e.g., database URLs, API keys
 
     class Config:
