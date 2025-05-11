@@ -51,11 +51,11 @@ async def get_packs_in_collection_route(
 ):
     """
     Lists all packs under a specific collection in Firestore.
-    
+
     Args:
         collection_id: The ID of the collection to get packs from
         db: Firestore client dependency
-    
+
     Returns:
         List of card packs in the collection
     """
@@ -69,7 +69,7 @@ async def get_pack_details_route(
 ):
     """
     Gets details for a specific card pack from Firestore.
-    
+
     Args:
         pack_id: The ID of the pack to retrieve
         collection_id: Optional ID of the collection containing the pack
@@ -147,14 +147,14 @@ async def update_rarity_probability_route(
 ):
     """
     Updates the probability of a specific rarity within a pack in a collection.
-    
+
     Args:
         collection_id: The ID of the pack collection
         pack_id: The ID of the pack
         rarity_id: The ID of the rarity
         request: UpdateRarityProbabilityRequest containing the new probability value
         db: Firestore client dependency
-        
+
     Returns:
         Dictionary with success message
     """
@@ -177,13 +177,13 @@ async def add_rarity_route(
 ):
     """
     Adds a new rarity with probability to a pack in a collection.
-    
+
     Args:
         collection_id: The ID of the pack collection
         pack_id: The ID of the pack to add the rarity to
         request: AddRarityRequest containing the rarity name and probability
         db: Firestore client dependency
-        
+
     Returns:
         Dictionary with success message
     """
@@ -206,13 +206,13 @@ async def delete_rarity_route(
 ):
     """
     Deletes a rarity from a pack in a collection.
-    
+
     Args:
         collection_id: The ID of the pack collection
         pack_id: The ID of the pack containing the rarity
         rarity_id: The ID of the rarity to delete
         db: Firestore client dependency
-        
+
     Returns:
         Dictionary with success message
     """
@@ -225,7 +225,7 @@ async def delete_rarity_route(
     except Exception as e:
         logger.error(f"Unhandled error in delete_rarity_route: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while deleting the rarity.")
-    
+
 @router.post("/{collection_id}/{pack_id}/rarities/{rarity_id}/cards", response_model=Dict[str, str], status_code=201)
 async def add_card_to_rarity_route(
     collection_id: str,
@@ -236,24 +236,24 @@ async def add_card_to_rarity_route(
 ):
     """
     Adds a card to the cards subcollection within a specific rarity in a pack.
-    
+
     The card information is fetched from the storage service using the collection_metadata_id
     and document_id provided in the request.
-    
+
     The card is stored as a document under /packs/{collection_id}/{packId}/rarities/{rarityId}/cards/{cardId}
     with the following fields:
     - globalRef: Reference to the global card document (DocumentReference)
     - name: Card name
     - quantity: Card quantity (updated after each draw)
     - point: Card point value (updated after each draw)
-    
+
     Args:
         collection_id: The ID of the pack collection containing the pack
         pack_id: The ID of the pack to add the card to
         rarity_id: The ID of the rarity to add the card to
         request: AddCardToRarityRequest containing collection_metadata_id and document_id
         db: Firestore client dependency
-        
+
     Returns:
         Dictionary with success message
     """
@@ -261,7 +261,7 @@ async def add_card_to_rarity_route(
         # Pass the collection_id as part of the pack_id path parameter
         # Format: collection_id/pack_id
         pack_path = f"{collection_id}/{pack_id}"
-        
+
         await add_card_to_rarity(
             collection_metadata_id=request.collection_metadata_id,
             document_id=request.document_id,
@@ -282,4 +282,52 @@ async def add_card_to_rarity_route(
     except Exception as e:
         logger.error(f"Unhandled error in add_card_to_rarity_route: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while adding the card to the rarity.")
-    
+
+@router.delete("/{collection_id}/{pack_id}/rarities/{rarity_id}/cards", response_model=Dict[str, str])
+async def delete_card_from_rarity_route(
+    collection_id: str,
+    pack_id: str,
+    rarity_id: str,
+    request: DeleteCardFromRarityRequest,
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Deletes a card from the cards subcollection within a specific rarity in a pack.
+
+    The card is identified by the collection_metadata_id and document_id provided in the request.
+
+    Args:
+        collection_id: The ID of the pack collection containing the pack
+        pack_id: The ID of the pack containing the card
+        rarity_id: The ID of the rarity containing the card
+        request: DeleteCardFromRarityRequest containing collection_metadata_id and document_id
+        db: Firestore client dependency
+
+    Returns:
+        Dictionary with success message
+    """
+    try:
+        # Pass the collection_id as part of the pack_id path parameter
+        # Format: collection_id/pack_id
+        pack_path = f"{collection_id}/{pack_id}"
+
+        await delete_card_from_rarity(
+            collection_metadata_id=request.collection_metadata_id,
+            document_id=request.document_id,
+            pack_id=pack_path,
+            rarity_id=rarity_id,
+            db_client=db
+        )
+        return {
+            "message": f"Successfully deleted card '{request.document_id}' from rarity '{rarity_id}' in pack '{pack_id}' in collection '{collection_id}'",
+            "card_id": request.document_id,
+            "rarity_id": rarity_id,
+            "pack_id": pack_id,
+            "collection_id": collection_id
+        }
+    except HTTPException:
+        # Re-raise HTTPExceptions from the service layer
+        raise
+    except Exception as e:
+        logger.error(f"Unhandled error in delete_card_from_rarity_route: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred while deleting the card from the rarity.")

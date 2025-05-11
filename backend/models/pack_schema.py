@@ -39,7 +39,7 @@ class CardInPack(BaseModel):
     quantity: Optional[int] = 0
     point: Optional[int] = 0
     image_url: Optional[str] = None
-    
+
     class Config:
         arbitrary_types_allowed = True
 
@@ -55,7 +55,7 @@ class AddCardToPackRequest(BaseModel):
 class UpdatePackRequest(BaseModel):
     """
     Request model for updating an existing card pack.
-    
+
     Fields:
     - pack_name: Optional new name for the pack.
     - description: Optional new description for the pack.
@@ -66,7 +66,7 @@ class UpdatePackRequest(BaseModel):
       Example: `{"common": {"data": {"probability": 0.75, "cards": ["new_card_x", "new_card_y"]}}}`
     - cards_to_add: Atomically adds cards to specific rarities without overwriting existing cards.
     - cards_to_delete: Atomically removes cards from specific rarities.
-    
+
     At least one field (pack_name, description, rarities, cards_to_add, or cards_to_delete)
     must be provided to make an update.
     """
@@ -74,11 +74,11 @@ class UpdatePackRequest(BaseModel):
     description: Optional[str] = None
     rarities: Optional[Dict[str, RarityDetail]] = None # Changed from Dict[str, Dict[str, Any]]
     win_rate: Optional[int] = None
-    
+
 class UpdateRarityProbabilityRequest(BaseModel):
     """
     Request model for updating the probability of a specific rarity in a card pack.
-    
+
     Fields:
     - probability: New probability value for the rarity (0.0 to 1.0)
     """
@@ -87,7 +87,7 @@ class UpdateRarityProbabilityRequest(BaseModel):
 class AddRarityRequest(BaseModel):
     """
     Request model for adding a new rarity with probability to a card pack.
-    
+
     Fields:
     - rarity_name: Name of the new rarity
     - probability: Probability value for the rarity (0.0 to 1.0)
@@ -98,7 +98,7 @@ class AddRarityRequest(BaseModel):
 class CollectionPackRarityParams(BaseModel):
     """
     Model for specifying the path parameters for accessing a rarity within a pack collection.
-    
+
     Fields:
     - collection_id: ID of the pack collection
     - pack_id: ID of the pack
@@ -119,10 +119,22 @@ class AddCardToRarityRequest(BaseModel):
     """
     Request model for adding a card to a rarity in a pack.
     This card will be stored as a document under /packs/{packId}/rarities/{rarityId}/cards/{cardId}
-    
+
     Fields:
     - collection_metadata_id: The ID of the collection metadata for fetching card details
     - document_id: The ID of the card to add (card name)
+    """
+    collection_metadata_id: str
+    document_id: str
+
+class DeleteCardFromRarityRequest(BaseModel):
+    """
+    Request model for deleting a card from a rarity in a pack.
+    This identifies the card to be deleted from /packs/{packId}/rarities/{rarityId}/cards/{cardId}
+
+    Fields:
+    - collection_metadata_id: The ID of the collection metadata for identifying the card
+    - document_id: The ID of the card to delete (card name)
     """
     collection_metadata_id: str
     document_id: str
