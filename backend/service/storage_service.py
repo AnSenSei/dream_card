@@ -179,14 +179,14 @@ async def process_new_card_submission(
         logger.info(f"Default storage_prefix set to: '{storage_prefix}'")
 
         logger.info(f"Collection metadata ID received: '{collection_metadata_id}'")
-        
+
         # Handle both None and empty string cases
         if collection_metadata_id and collection_metadata_id.strip():
             try:
                 # Try to get the metadata for the collection
                 logger.info(f"Looking up metadata for collection: '{collection_metadata_id}'")
                 metadata = await get_collection_metadata(collection_metadata_id)
-                
+
                 effective_collection_name = metadata.firestoreCollection
                 storage_prefix = metadata.storagePrefix
                 logger.info(f"Using metadata for collection '{collection_metadata_id}': firestoreCollection='{effective_collection_name}', storagePrefix='{storage_prefix}'")
@@ -218,14 +218,14 @@ async def process_new_card_submission(
         firestore_client = get_firestore_client()
         doc_ref = firestore_client.collection(effective_collection_name).document(card_name)
         doc_snapshot = await doc_ref.get()
-        
+
         if doc_snapshot.exists:
             logger.error(f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'.")
             raise HTTPException(
                 status_code=409,  # 409 Conflict is more appropriate than 500
                 detail=f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'."
             )
-            
+
         # Generate a signed URL for the image
         try:
             signed_image_url = await generate_signed_url(image_url)
@@ -233,7 +233,7 @@ async def process_new_card_submission(
         except Exception as sign_error:
             logger.warning(f"Failed to generate signed URL for {image_url}: {sign_error}")
             signed_image_url = image_url  # Fall back to original URL
-            
+
         card_data = StoredCardInfo(
             id=card_name,  # Use card_name as the ID for the StoredCardInfo model
             card_name=card_name,
@@ -572,6 +572,131 @@ async def update_card_information(document_id: str, update_data: dict, collectio
         logger.error(f"Error updating card {document_id} in '{effective_collection_name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Could not update card information in '{effective_collection_name}'.")
 
+async def clean_fusion_references(document_id: str, collection_name: str | None = None, fusion_id_to_remove: str | None = None) -> None:
+    """
+    Cleans up fusion references when a card is deleted or when a specific fusion recipe is deleted.
+    If the card has a used_in_fusion field, it deletes all fusion recipes that use this card.
+    If fusion_id_to_remove is provided, it only removes that specific fusion from the card's used_in_fusion array.
+
+    Args:
+        document_id: The ID of the card being deleted or cleaned
+        collection_name: The collection name where the card is stored. If provided, it will look up
+                        the metadata for that collection to get the actual Firestore collection name.
+        fusion_id_to_remove: If provided, only this specific fusion ID will be removed from the card's used_in_fusion array.
+    """
+    firestore_client = get_firestore_client()
+
+    # Determine the effective collection name
+    if not collection_name:
+        effective_collection_name = settings.firestore_collection_cards
+    else:
+        # Try to get the metadata for the collection
+        try:
+            metadata = await get_collection_metadata(collection_name)
+            effective_collection_name = metadata.firestoreCollection
+            logger.info(f"Using metadata for collection '{collection_name}': firestoreCollection='{effective_collection_name}'")
+        except HTTPException as e:
+            if e.status_code == 404:
+                # If metadata not found, use the provided collection_name as is
+                effective_collection_name = collection_name
+                logger.warning(f"Metadata for collection '{collection_name}' not found. Using provided collection_name as is.")
+            else:
+                # For other HTTP exceptions, re-raise
+                raise e
+
+    try:
+        # Get the card document to check if it has used_in_fusion field
+        doc_ref = firestore_client.collection(effective_collection_name).document(document_id)
+        doc = await doc_ref.get()
+
+        if not doc.exists:
+            logger.warning(f"Card {document_id} not found in collection '{effective_collection_name}' when cleaning fusion references.")
+            return
+
+        card_data = doc.to_dict()
+
+
+        # Check if the card has used_in_fusion field
+        if 'used_in_fusion' in card_data and card_data['used_in_fusion']:
+            logger.info(f"Card {document_id} has fusion references. Cleaning up...")
+
+            # If fusion_id_to_remove is provided, only remove that specific fusion
+            if fusion_id_to_remove:
+                # Filter out the fusion with the specified fusion_id
+                updated_fusions = [
+                    fusion for fusion in card_data['used_in_fusion'] 
+                    if fusion.get('fusion_id') != fusion_id_to_remove and fusion.get('result_card_id') != fusion_id_to_remove
+                ]
+
+                # Update the card with the filtered array
+                await doc_ref.update({
+                    'used_in_fusion': updated_fusions
+                })
+
+                logger.info(f"Removed fusion information from card '{document_id}' (with collection_id '{effective_collection_name}') for fusion ID '{fusion_id_to_remove}'")
+            else:
+                # Iterate through all fusion recipes referenced in used_in_fusion
+                for fusion_info in card_data['used_in_fusion']:
+                    result_card_id = fusion_info.get('result_card_id')
+
+                    if result_card_id:
+                        try:
+                            # Delete the fusion recipe
+                            fusion_doc_ref = firestore_client.collection('fusion_recipes').document(result_card_id)
+                            fusion_doc = await fusion_doc_ref.get()
+
+                            if fusion_doc.exists:
+                                # Get the recipe data to find all ingredients
+                                recipe_data = fusion_doc.to_dict()
+
+                                # Remove fusion information from all ingredient cards
+                                if 'ingredients' in recipe_data and recipe_data['ingredients']:
+                                    for ingredient_data in recipe_data['ingredients']:
+                                        try:
+                                            # Get card_id and card_collection_id from ingredient data
+                                            card_id = ingredient_data.get('card_id')
+                                            card_collection_id = ingredient_data.get('card_collection_id')
+
+                                            if card_id and card_collection_id:
+                                                # Skip the card being deleted
+                                                if card_id == document_id and card_collection_id == effective_collection_name:
+                                                    continue
+
+                                                # Get the card document
+                                                ingredient_doc_ref = firestore_client.collection(card_collection_id).document(card_id)
+                                                ingredient_doc = await ingredient_doc_ref.get()
+
+                                                if ingredient_doc.exists:
+                                                    ingredient_data = ingredient_doc.to_dict()
+
+                                                    # Remove this fusion from the used_in_fusion array
+                                                    if 'used_in_fusion' in ingredient_data:
+                                                        if ingredient_data['used_in_fusion']:
+                                                            # Filter out the fusion with this result_card_id
+                                                            updated_fusions = [
+                                                                fusion for fusion in ingredient_data['used_in_fusion'] 
+                                                                if fusion.get('result_card_id') != result_card_id
+                                                            ]
+
+                                                            # Update the card with the filtered array
+                                                            await ingredient_doc_ref.update({
+                                                                'used_in_fusion': updated_fusions
+                                                            })
+
+                                                            logger.info(f"Removed fusion information from card '{card_id}' in collection '{card_collection_id}'")
+                                        except Exception as e:
+                                            # Log the error but continue with other ingredients
+                                            logger.error(f"Error removing fusion information from ingredient card: {e}", exc_info=True)
+
+                                # Delete the fusion recipe
+                                await fusion_doc_ref.delete()
+                                logger.info(f"Deleted fusion recipe '{result_card_id}'")
+                        except Exception as e:
+                            # Log the error but continue with other fusion recipes
+                            logger.error(f"Error deleting fusion recipe '{result_card_id}': {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"Error cleaning fusion references for card {document_id}: {e}", exc_info=True)
+
 async def delete_card_from_firestore(document_id: str, collection_name: str | None = None) -> None:
     """
     Deletes a card document from Firestore.
@@ -598,6 +723,9 @@ async def delete_card_from_firestore(document_id: str, collection_name: str | No
             else:
                 # For other HTTP exceptions, re-raise
                 raise e
+
+    # Clean up fusion references before deleting the card
+    await clean_fusion_references(document_id, effective_collection_name)
 
     doc_ref = firestore_client.collection(effective_collection_name).document(document_id)
     try:
@@ -706,15 +834,15 @@ async def get_card_by_id(document_id: str, collection_name: str | None = None) -
 
     If collection_name is provided, it will look up the metadata for that collection
     in the metadata collection and use the firestoreCollection for the Firestore collection.
-    
+
     Returns:
         StoredCardInfo: Complete data for the requested card
-    
+
     Raises:
         HTTPException: 404 if card not found, 500 for other errors
     """
     firestore_client = get_firestore_client()
-    
+
     if not collection_name:
         effective_collection_name = settings.firestore_collection_cards
     else:
@@ -731,20 +859,20 @@ async def get_card_by_id(document_id: str, collection_name: str | None = None) -
             else:
                 # For other HTTP exceptions, re-raise
                 raise e
-    
+
     doc_ref = firestore_client.collection(effective_collection_name).document(document_id)
-    
+
     try:
         doc = await doc_ref.get()
-        
+
         if not doc.exists:
             logger.warning(f"Card with ID {document_id} not found in collection '{effective_collection_name}'.")
             raise HTTPException(status_code=404, detail=f"Card with ID {document_id} not found")
-            
+
         # Get the card data and add the document ID
         card_data = doc.to_dict()
         card_data['id'] = document_id
-        
+
         # Generate signed URL for the image if it's a GCS URI
         if 'image_url' in card_data and card_data['image_url'].startswith('gs://'):
             try:
@@ -753,9 +881,9 @@ async def get_card_by_id(document_id: str, collection_name: str | None = None) -
             except Exception as sign_error:
                 logger.error(f"Failed to generate signed URL for {card_data['image_url']}: {sign_error}")
                 # Keep the original URL if signing fails
-        
+
         return StoredCardInfo(**card_data)
-    
+
     except HTTPException as e:
         raise e
     except Exception as e:

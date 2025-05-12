@@ -19,148 +19,7 @@ logger = get_logger(__name__)
 
 GCS_BUCKET_NAME = settings.PACKS_BUCKET
 
-async def add_rarity_with_probability(
-    collection_id: str,
-    pack_id: str,
-    rarity_id: str,
-    probability: float,
-    db_client: firestore.AsyncClient
-) -> bool:
-    """
-    Adds a new rarity with a probability to a pack within a collection.
 
-    Args:
-        collection_id: The ID of the pack collection
-        pack_id: The ID of the pack to add the rarity to
-        rarity_id: The name/ID of the new rarity
-        probability: The probability value for the rarity (0.0 to 1.0)
-        db_client: Firestore client
-
-    Returns:
-        bool: True if addition was successful
-
-    Raises:
-        HTTPException: If pack doesn't exist, rarity already exists, or if there was an error adding
-    """
-    if probability < 0.0 or probability > 1.0:
-        raise HTTPException(status_code=400, detail="Probability must be between 0.0 and 1.0")
-
-    try:
-        # Check if the pack exists in the collection
-        pack_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(pack_id)
-        pack_snap = await pack_ref.get()
-        if not pack_snap.exists:
-            raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found in collection '{collection_id}'")
-
-        # Check if the rarity already exists
-        rarity_ref = pack_ref.collection('rarities').document(rarity_id)
-        rarity_snap = await rarity_ref.get()
-        if rarity_snap.exists:
-            raise HTTPException(status_code=409, detail=f"Rarity '{rarity_id}' already exists in pack '{pack_id}'")
-
-        # Add the new rarity with probability
-        await rarity_ref.set({"probability": probability})
-
-        logger.info(f"Added new rarity '{rarity_id}' to pack '{pack_id}' in collection '{collection_id}' with probability {probability}")
-        return True
-
-    except HTTPException:
-        # Re-raise HTTPExceptions
-        raise
-    except Exception as e:
-        logger.error(f"Error adding rarity with probability: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to add rarity with probability: {str(e)}")
-
-async def delete_rarity(
-    collection_id: str,
-    pack_id: str,
-    rarity_id: int,
-    db_client: firestore.AsyncClient
-) -> bool:
-    """
-    Deletes a rarity from a pack in a collection.
-
-    Args:
-        collection_id: The ID of the pack collection
-        pack_id: The ID of the pack containing the rarity
-        rarity_id: The ID of the rarity to delete
-        db_client: Firestore client
-
-    Returns:
-        bool: True if deletion was successful
-
-    Raises:
-        HTTPException: If pack or rarity doesn't exist, or if there was an error deleting
-    """
-    try:
-        # Get reference to the rarity document
-        rarity_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(pack_id).collection('rarities').document(rarity_id)
-
-        # Check if the rarity exists
-        rarity_snap = await rarity_ref.get()
-        if not rarity_snap.exists:
-            raise HTTPException(status_code=404, detail=f"Rarity '{rarity_id}' not found in pack '{pack_id}' in collection '{collection_id}'")
-
-        # Delete the rarity
-        await rarity_ref.delete()
-
-        logger.info(f"Deleted rarity '{rarity_id}' from pack '{pack_id}' in collection '{collection_id}'")
-        return True
-
-    except HTTPException:
-        # Re-raise HTTPExceptions
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting rarity: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete rarity: {str(e)}")
-
-async def update_rarity_probability(
-    collection_id: str,
-    pack_id: str,
-    rarity_id: str,
-    probability: float,
-    db_client: firestore.AsyncClient
-) -> bool:
-    """
-    Updates the probability field of a specific rarity within a pack in a collection.
-
-    Args:
-        collection_id: The ID of the pack collection
-        pack_id: The ID of the pack containing the rarity
-        rarity_id: The ID of the rarity to update
-        probability: The new probability value (0.0 to 1.0)
-        db_client: Firestore client
-
-    Returns:
-        bool: True if update was successful
-
-    Raises:
-        HTTPException: If pack or rarity doesn't exist, or if there was an error updating
-    """
-    if probability < 0.0 or probability > 1.0:
-        raise HTTPException(status_code=400, detail="Probability must be between 0.0 and 1.0")
-
-    try:
-        # Get reference to the rarity document
-        rarity_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(pack_id).collection('rarities').document(rarity_id)
-
-        # Check if the rarity exists
-        rarity_snap = await rarity_ref.get()
-        if not rarity_snap.exists:
-            raise HTTPException(status_code=404, detail=f"Rarity '{rarity_id}' not found in pack '{pack_id}' in collection '{collection_id}'")
-
-        # Update the probability field
-        await rarity_ref.update({"probability": probability})
-
-        logger.info(f"Updated probability for rarity '{rarity_id}' in pack '{pack_id}' in collection '{collection_id}' to {probability}")
-        return True
-
-    except HTTPException:
-        # Re-raise HTTPExceptions 
-        raise
-    except Exception as e:
-        logger.error(f"Error updating rarity probability: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to update rarity probability: {str(e)}")
 
 async def create_pack_in_firestore(
     pack_data: AddPackRequest, 
@@ -197,6 +56,7 @@ async def create_pack_in_firestore(
     pack_name = pack_data.pack_name
     collection_id = pack_data.collection_id
     win_rate = pack_data.win_rate
+    is_active = pack_data.is_active
 
     if not pack_name:
         raise HTTPException(status_code=400, detail="Pack name cannot be empty.")
@@ -265,6 +125,7 @@ async def create_pack_in_firestore(
             "id": pack_id,
             "created_at": firestore.SERVER_TIMESTAMP,
             "win_rate": win_rate,
+            "is_active": is_active,
         }
         if image_gcs_uri_for_firestore:
             pack_doc_data["image_url"] = image_gcs_uri_for_firestore
@@ -273,11 +134,8 @@ async def create_pack_in_firestore(
         await pack_doc_ref.set(pack_doc_data)
         logger.info(f"Created pack document '{pack_name}' (ID: {pack_id}) in collection '{collection_id}'. Image URI: {image_gcs_uri_for_firestore or 'None'}")
 
-        # Create rarities subcollection
-        rarities_collection_ref = pack_doc_ref.collection('rarities')
-        for rarity_level, rarity_detail_model in pack_data.rarities_config.items():
-            rarity_doc_ref = rarities_collection_ref.document(rarity_level)
-            await rarity_doc_ref.set(rarity_detail_model.data)
+        # Create empty rarities subcollection
+        # Rarities will be populated when cards are added to the pack
 
         return pack_id
     except HTTPException:
@@ -605,8 +463,8 @@ async def add_card_from_storage_to_pack(
                 detail=f"Failed to fetch card details: {e.detail}"
             )
 
-            # Log the rarity configuration for debugging
-            logger.info(f"Creating pack '{pack_name}' in collection '{collection_id}' with rarities config: {parsed_rarities_config}")
+            # Log the card collection for debugging
+            logger.info(f"Fetching card from collection '{card_collection}' for pack '{pack_id}'")
 
         # Create global card reference
         global_card_ref = db_client.collection('GlobalCards').document(card_id)
@@ -632,30 +490,32 @@ async def add_card_from_storage_to_pack(
         logger.error(f"Error adding card to pack: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to add card to pack: {str(e)}")
 
-async def add_card_to_rarity(
+async def add_card_direct_to_pack(
     collection_metadata_id: str,
     document_id: str,
     pack_id: str,
-    rarity_id: str,
+    probability: float,
     db_client: AsyncClient
 ) -> bool:
     """
-    Adds a card under the cards subcollection within a specific rarity in a pack.
+    Adds a card directly to a pack with its own probability.
     Fetches card details from storage_service using the provided document_id and collection_metadata_id.
 
     Args:
         collection_metadata_id: The ID of the collection metadata to use for fetching card
         document_id: The ID of the card to add
         pack_id: The ID of the pack to add the card to (can include collection_id, formatted as 'collection_id/pack_id')
-        rarity_id: The ID of the rarity to add the card to
+        probability: The probability value for the card (0.0 to 1.0)
         db_client: Firestore client
 
     Returns:
         bool: True if successfully added
 
     Raises:
-        HTTPException: If pack or rarity doesn't exist, or if card fetch fails, or other errors
+        HTTPException: If pack doesn't exist, or if card fetch fails, or other errors
     """
+    if probability < 0.0 or probability > 1.0:
+        raise HTTPException(status_code=400, detail="Probability must be between 0.0 and 1.0")
     from service.storage_service import get_card_by_id
 
     try:
@@ -679,13 +539,6 @@ async def add_card_to_rarity(
         if not pack_snap.exists:
             logger.error(f"Pack not found: {pack_id}")
             raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
-
-        # Check if rarity exists
-        rarity_ref = pack_ref.collection('rarities').document(rarity_id)
-        rarity_snap = await rarity_ref.get()
-        if not rarity_snap.exists:
-            logger.error(f"Rarity '{rarity_id}' not found in pack '{pack_id}'")
-            raise HTTPException(status_code=404, detail=f"Rarity '{rarity_id}' not found in pack '{pack_id}'")
 
         # Fetch card information from storage_service
         try:
@@ -712,68 +565,64 @@ async def add_card_to_rarity(
 
         global_card_ref = db_client.collection(global_card_collection).document(document_id)
 
-        # Prepare card data for the subcollection
+        # Prepare card data with probability
         card_doc_data = {
             "globalRef": global_card_ref,
             "name": card_info.card_name,
             "quantity": card_info.quantity,
-            "point": card_info.point_worth
+            "point": card_info.point_worth,
+            "probability": probability
         }
 
         # Add image_url if available
         if hasattr(card_info, 'image_url') and card_info.image_url:
             card_doc_data["image_url"] = card_info.image_url
 
-        # Add card to the cards subcollection under the rarity
-        card_ref = rarity_ref.collection('cards').document(document_id)
+        # Add card directly to the cards subcollection under the pack
+        card_ref = pack_ref.collection('cards').document(document_id)
         await card_ref.set(card_doc_data)
 
-        # Now update the rarity document to include this card in its cards array
-        rarity_data = rarity_snap.to_dict()
-        data_field = rarity_data.get('data', {})
-        cards_array = data_field.get('cards', [])
+        # Update the pack document to include this card in its cards array if needed
+        # This is optional and depends on whether you want to maintain a list of cards in the pack document
+        pack_data = pack_snap.to_dict()
+        cards_array = pack_data.get('cards', [])
 
         # Add the card ID to the array if it's not already there
         if document_id not in cards_array:
             cards_array.append(document_id)
-            await rarity_ref.set({
-                'data': {
-                    **data_field,
-                    'cards': cards_array
-                }
+            await pack_ref.set({
+                'cards': cards_array
             }, merge=True)
 
-        logger.info(f"Successfully added card '{document_id}' to rarity '{rarity_id}' in pack '{pack_id}'")
+        logger.info(f"Successfully added card '{document_id}' directly to pack '{pack_id}' with probability {probability}")
         return True
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error adding card to rarity: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to add card to rarity: {str(e)}")
+        logger.error(f"Error adding card to pack: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add card to pack: {str(e)}")
 
 
-async def delete_card_from_rarity(
+async def delete_card_from_pack(
     collection_metadata_id: str,
     document_id: str,
     pack_id: str,
-    rarity_id: str,
     db_client: AsyncClient
 ) -> bool:
     """
-    Deletes a card from the cards subcollection within a specific rarity in a pack.
+    Deletes a card directly from a pack.
 
     Args:
         collection_metadata_id: The ID of the collection metadata for identifying the card
         document_id: The ID of the card to delete
         pack_id: The ID of the pack containing the card (can include collection_id, formatted as 'collection_id/pack_id')
-        rarity_id: The ID of the rarity containing the card
         db_client: Firestore client
 
     Returns:
         bool: True if successfully deleted
 
     Raises:
-        HTTPException: If pack or rarity doesn't exist, or if card doesn't exist, or other errors
+        HTTPException: If pack doesn't exist, or if card doesn't exist, or other errors
     """
     try:
         # Parse the pack_id which may include collection_id (format: 'collection_id/pack_id')
@@ -797,45 +646,34 @@ async def delete_card_from_rarity(
             logger.error(f"Pack not found: {pack_id}")
             raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
 
-        # Check if rarity exists
-        rarity_ref = pack_ref.collection('rarities').document(rarity_id)
-        rarity_snap = await rarity_ref.get()
-        if not rarity_snap.exists:
-            logger.error(f"Rarity '{rarity_id}' not found in pack '{pack_id}'")
-            raise HTTPException(status_code=404, detail=f"Rarity '{rarity_id}' not found in pack '{pack_id}'")
-
-        # Check if card exists in the rarity
-        card_ref = rarity_ref.collection('cards').document(document_id)
+        # Check if card exists in the pack
+        card_ref = pack_ref.collection('cards').document(document_id)
         card_snap = await card_ref.get()
         if not card_snap.exists:
-            logger.error(f"Card '{document_id}' not found in rarity '{rarity_id}' in pack '{pack_id}'")
-            raise HTTPException(status_code=404, detail=f"Card '{document_id}' not found in rarity '{rarity_id}' in pack '{pack_id}'")
+            logger.error(f"Card '{document_id}' not found in pack '{pack_id}'")
+            raise HTTPException(status_code=404, detail=f"Card '{document_id}' not found in pack '{pack_id}'")
 
         # Delete the card from the cards subcollection
         await card_ref.delete()
 
-        # Now update the rarity document to remove this card from its cards array
-        rarity_data = rarity_snap.to_dict()
-        data_field = rarity_data.get('data', {})
-        cards_array = data_field.get('cards', [])
+        # Now update the pack document to remove this card from its cards array if it exists
+        pack_data = pack_snap.to_dict()
+        cards_array = pack_data.get('cards', [])
 
         # Remove the card ID from the array if it's there
         if document_id in cards_array:
             cards_array.remove(document_id)
-            await rarity_ref.set({
-                'data': {
-                    **data_field,
-                    'cards': cards_array
-                }
+            await pack_ref.set({
+                'cards': cards_array
             }, merge=True)
 
-        logger.info(f"Successfully deleted card '{document_id}' from rarity '{rarity_id}' in pack '{pack_id}'")
+        logger.info(f"Successfully deleted card '{document_id}' from pack '{pack_id}'")
         return True
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error deleting card from rarity: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to delete card from rarity: {str(e)}")
+        logger.error(f"Error deleting card from pack: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete card from pack: {str(e)}")
 
 async def update_pack_in_firestore(
     pack_id: str, 
@@ -911,3 +749,113 @@ async def update_pack_in_firestore(
         return True
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update pack: {e}")
+
+async def activate_pack_in_firestore(
+    pack_id: str,
+    db_client: AsyncClient
+) -> bool:
+    """
+    Activates a pack by setting its is_active field to True.
+
+    Args:
+        pack_id: The ID of the pack to activate
+        db_client: Firestore client
+
+    Returns:
+        bool: True if the pack was successfully activated
+
+    Raises:
+        HTTPException: If the pack doesn't exist or there's an error activating it
+    """
+    try:
+        # Check if pack_id contains a slash (indicating collection_id/pack_id format)
+        parts = pack_id.split('/', 1)
+        if len(parts) > 1:
+            # If pack_id includes collection_id (collection_id/pack_id format)
+            collection_id, actual_pack_id = parts
+            logger.info(f"Parsed pack_id '{pack_id}' into collection_id='{collection_id}' and pack_id='{actual_pack_id}'")
+
+            # Construct the reference to the pack document
+            pack_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(actual_pack_id)
+        else:
+            # If just a simple pack_id
+            logger.warning(f"No collection_id found in pack_id '{pack_id}', using it directly as document ID")
+            pack_ref = db_client.collection('packs').document(pack_id)
+
+        # Check if pack exists
+        pack_snap = await pack_ref.get()
+        if not pack_snap.exists:
+            logger.error(f"Pack not found: {pack_id}")
+            raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
+
+        # Update the is_active field to True
+        await pack_ref.update({"is_active": True})
+
+        logger.info(f"Successfully activated pack '{pack_id}'")
+        return True
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error activating pack: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to activate pack: {str(e)}")
+
+async def delete_pack_in_firestore(
+    pack_id: str,
+    db_client: AsyncClient
+) -> bool:
+    """
+    Deletes a pack from Firestore.
+
+    Args:
+        pack_id: The ID of the pack to delete
+        db_client: Firestore client
+
+    Returns:
+        bool: True if the pack was successfully deleted
+
+    Raises:
+        HTTPException: If the pack doesn't exist or there's an error deleting it
+    """
+    try:
+        # Check if pack_id contains a slash (indicating collection_id/pack_id format)
+        parts = pack_id.split('/', 1)
+        if len(parts) > 1:
+            # If pack_id includes collection_id (collection_id/pack_id format)
+            collection_id, actual_pack_id = parts
+            logger.info(f"Parsed pack_id '{pack_id}' into collection_id='{collection_id}' and pack_id='{actual_pack_id}'")
+
+            # Construct the reference to the pack document
+            pack_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(actual_pack_id)
+        else:
+            # If just a simple pack_id
+            logger.warning(f"No collection_id found in pack_id '{pack_id}', using it directly as document ID")
+            pack_ref = db_client.collection('packs').document(pack_id)
+
+        # Check if pack exists
+        pack_snap = await pack_ref.get()
+        if not pack_snap.exists:
+            logger.error(f"Pack not found: {pack_id}")
+            raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
+
+        # Delete all cards in the pack's cards subcollection
+        cards_collection = pack_ref.collection('cards')
+        cards = await cards_collection.get()
+
+        # Use a batch to delete all cards
+        batch = db_client.batch()
+        for card in cards:
+            batch.delete(card.reference)
+
+        # Delete the pack document itself
+        batch.delete(pack_ref)
+
+        # Commit the batch
+        await batch.commit()
+
+        logger.info(f"Successfully deleted pack '{pack_id}' and all its cards")
+        return True
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deleting pack: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete pack: {str(e)}")

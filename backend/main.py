@@ -7,8 +7,9 @@ from fastapi.responses import HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from config import get_logger, instrument_app, settings # Assuming settings might be used later
-from router import packs_router# Your existing routers
-from router import storage_router # Import the new storage router
+from router import packs_router # Your existing routers
+from router import storage_router # Import the storage router
+from router import fusion_router # Import the fusion router
 
 # Configure logging with structured logger
 logger = get_logger("main") # Use the logger from config
@@ -68,8 +69,9 @@ logger.info(f"SessionMiddleware added to /api/{API_VERSION} with a generated SEC
 
 # Include your existing routers into the sub-API
 api_v1.include_router(packs_router.router)
-api_v1.include_router(storage_router.router) # Include the new storage router
-logger.info("Gacha routers (packs, cards, draw) and storage router included in the sub-API.")
+api_v1.include_router(storage_router.router) # Include the storage router
+api_v1.include_router(fusion_router.router) # Include the fusion router
+logger.info("Gacha routers (packs, cards, draw), storage router, and fusion router included in the sub-API.")
 
 
 # Mount the sub-API (api_v1) under the main app (app)
@@ -80,7 +82,7 @@ logger.info(f"Sub-API mounted at /{SERVICE_PATH}/api/{API_VERSION}")
 if __name__ == "__main__":
     port = 8080 # Default port
     host = "0.0.0.0" # Listen on all available IPs
-    
+
     # You could also load host/port from config.settings
     # port = settings.APP_PORT or 8080
     # host = settings.APP_HOST or "0.0.0.0"
