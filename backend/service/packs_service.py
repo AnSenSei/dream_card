@@ -582,17 +582,16 @@ async def add_card_direct_to_pack(
         card_ref = pack_ref.collection('cards').document(document_id)
         await card_ref.set(card_doc_data)
 
-        # Update the pack document to include this card in its cards array if needed
-        # This is optional and depends on whether you want to maintain a list of cards in the pack document
+        # Update the pack document to include this card in its cards map if needed
+        # This is optional and depends on whether you want to maintain a map of cards in the pack document
         pack_data = pack_snap.to_dict()
-        cards_array = pack_data.get('cards', [])
+        cards_map = pack_data.get('cards', {})
 
-        # Add the card ID to the array if it's not already there
-        if document_id not in cards_array:
-            cards_array.append(document_id)
-            await pack_ref.set({
-                'cards': cards_array
-            }, merge=True)
+        # Add the card ID to the map with its probability
+        cards_map[document_id] = probability
+        await pack_ref.set({
+            'cards': cards_map
+        }, merge=True)
 
         logger.info(f"Successfully added card '{document_id}' directly to pack '{pack_id}' with probability {probability}")
         return True
@@ -656,15 +655,15 @@ async def delete_card_from_pack(
         # Delete the card from the cards subcollection
         await card_ref.delete()
 
-        # Now update the pack document to remove this card from its cards array if it exists
+        # Now update the pack document to remove this card from its cards map if it exists
         pack_data = pack_snap.to_dict()
-        cards_array = pack_data.get('cards', [])
+        cards_map = pack_data.get('cards', {})
 
-        # Remove the card ID from the array if it's there
-        if document_id in cards_array:
-            cards_array.remove(document_id)
+        # Remove the card ID from the map if it's there
+        if document_id in cards_map:
+            del cards_map[document_id]
             await pack_ref.set({
-                'cards': cards_array
+                'cards': cards_map
             }, merge=True)
 
         logger.info(f"Successfully deleted card '{document_id}' from pack '{pack_id}'")
