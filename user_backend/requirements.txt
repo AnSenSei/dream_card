@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+pydantic[email]
+itsdangerous
+python-dotenv
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-logging
+google-cloud-storage
+google-cloud-firestore
+python-jose[cryptography]
+passlib[bcrypt]
+httpx
