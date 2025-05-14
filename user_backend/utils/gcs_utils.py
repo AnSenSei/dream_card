@@ -1,11 +1,15 @@
 import os
+import base64
 from datetime import timedelta
+from typing import Optional, Tuple
+import uuid
 
 import google.auth.transport.requests
 from google.auth import compute_engine
 import google.auth
 from google.oauth2 import service_account
-from config import get_logger, get_storage_client
+from fastapi import HTTPException
+from config import get_logger, get_storage_client, settings
 
 logger = get_logger(__name__)
 
@@ -26,14 +30,14 @@ async def generate_signed_url(gcs_uri: str) -> str:
             logger.warning(f"Could not parse bucket/blob name from GCS URI: {gcs_uri}")
             return gcs_uri
         bucket_name, blob_name = parts[0], parts[1]
-        
+
         storage_client = get_storage_client() # Use centralized client getter
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
-        
+
         # Set expiration time (e.g., 1 hour)
         expiration = timedelta(seconds=3600) 
-        
+
         # Determine credentials based on environment
         credentials = None
         if os.getenv("K_SERVICE") or os.getenv("GOOGLE_COMPUTE_ENGINE_PROJECT"): # Check for Cloud Run or other GCE
@@ -64,9 +68,122 @@ async def generate_signed_url(gcs_uri: str) -> str:
             method="GET",
             credentials=credentials,
         )
-        
+
         return signed_url
 
     except Exception as e:
         logger.error(f"Error generating signed URL for {gcs_uri}: {e}", exc_info=True)
         return gcs_uri # Fallback: Return original URI if signing fails
+
+async def upload_avatar_to_gcs(avatar_data: str, user_id: str) -> str:
+    """
+    Uploads an avatar image to Google Cloud Storage.
+
+    Args:
+        avatar_data: Either a base64 encoded image data string or binary data
+        user_id: The ID of the user whose avatar is being uploaded
+
+    Returns:
+        The GCS URI of the uploaded avatar
+
+    Raises:
+        HTTPException: If there's an error uploading the avatar
+    """
+    try:
+        # Check if avatar_data is a base64 encoded image
+        if avatar_data and avatar_data.startswith(('data:image/', 'data:application/')):
+            # Extract content type and base64 data
+            content_type, base64_data = parse_base64_image(avatar_data)
+
+            # Decode the base64 data to binary
+            binary_data = base64.b64decode(base64_data)
+        else:
+            # Assume it's binary data
+            # Try to determine content type from the binary data
+            import magic
+            try:
+                mime = magic.Magic(mime=True)
+                content_type = mime.from_buffer(avatar_data)
+                binary_data = avatar_data
+            except ImportError:
+                # If python-magic is not installed, default to octet-stream
+                content_type = 'application/octet-stream'
+                binary_data = avatar_data
+            except Exception as e:
+                logger.warning(f"Could not determine content type from binary data: {e}")
+                content_type = 'application/octet-stream'
+                binary_data = avatar_data
+
+        # Generate a unique filename for the avatar
+        filename = f"{user_id}_{uuid.uuid4()}.{get_file_extension(content_type)}"
+
+        # Get the storage client
+        storage_client = get_storage_client()
+
+        # Get the bucket
+        bucket = storage_client.bucket(settings.user_avator_bucket)
+
+        # Create a blob
+        blob = bucket.blob(filename)
+
+        # Upload the image
+        blob.upload_from_string(
+            binary_data,
+            content_type=content_type
+        )
+
+        # Return the GCS URI
+        gcs_uri = f"gs://{settings.user_avator_bucket}/{filename}"
+        logger.info(f"Uploaded avatar for user {user_id} to {gcs_uri}")
+
+        return gcs_uri
+    except ValueError as e:
+        logger.error(f"Invalid avatar data: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error uploading avatar for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to upload avatar: {str(e)}")
+
+def parse_base64_image(base64_image: str) -> Tuple[str, str]:
+    """
+    Parses a base64 encoded image string to extract content type and base64 data.
+
+    Args:
+        base64_image: Base64 encoded image string (e.g., "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEA...")
+
+    Returns:
+        A tuple containing the content type and base64 data
+
+    Raises:
+        ValueError: If the base64 image string is invalid
+    """
+    try:
+        # Split the base64 image string into content type and data
+        content_type_part, base64_data = base64_image.split(';base64,')
+        content_type = content_type_part.split(':')[1]
+
+        return content_type, base64_data
+    except Exception as e:
+        raise ValueError(f"Invalid base64 image format: {e}")
+
+def get_file_extension(content_type: str) -> str:
+    """
+    Gets the file extension for a given content type.
+
+    Args:
+        content_type: The content type (e.g., "image/jpeg")
+
+    Returns:
+        The file extension (e.g., "jpg")
+    """
+    content_type_map = {
+        'image/jpeg': 'jpg',
+        'image/jpg': 'jpg',
+        'image/png': 'png',
+        'image/gif': 'gif',
+        'image/webp': 'webp',
+        'image/svg+xml': 'svg',
+        'application/octet-stream': 'bin'
+    }
+
+    return content_type_map.get(content_type, 'bin')

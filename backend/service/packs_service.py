@@ -567,10 +567,11 @@ async def add_card_direct_to_pack(
 
         # Prepare card data with probability
         card_doc_data = {
-            "globalRef": global_card_ref,
-            "name": card_info.card_name,
+            "card_reference": global_card_ref,
+            "card_name": card_info.card_name,
             "quantity": card_info.quantity,
-            "point": card_info.point_worth,
+            "point_worth": card_info.point_worth,
+            "rarity":card_info.rarity,
             "probability": probability
         }
 

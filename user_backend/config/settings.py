@@ -4,6 +4,7 @@ class Settings(BaseSettings):
     app_name: str = "User Service API"
     gcs_project_id: str = "seventh-program-433718-h8"
     gcs_bucket_name: str = "user_profiles"
+    user_avator_bucket: str = "user_avator"
     firestore_project_id: str = "seventh-program-433718-h8" # Use the actual Project ID
     firestore_collection_users: str = "users"
 

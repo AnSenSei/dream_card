@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body
-from typing import Optional
+from typing import Optional, List
 from google.cloud import firestore
 
-from models.schemas import User, UserCard, UserCardsResponse
+from models.schemas import User, UserCard, UserCardsResponse, UserEmailAddressUpdate, Address, DrawnCard, CardReferencesRequest, AddPointsRequest
 from service.user_service import (
     get_user_by_id,
     add_card_to_user,
@@ -11,7 +11,11 @@ from service.user_service import (
     draw_multiple_cards_from_pack,
     get_user_cards,
     destroy_card,
-    withdraw_ship_card
+    withdraw_ship_card,
+    update_user_email_and_address,
+    add_user_address,
+    delete_user_address,
+    add_points_to_user
 )
 from config import get_firestore_client, get_logger
 
@@ -41,20 +45,21 @@ async def get_user_route(
         logger.error(f"Error getting user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while retrieving the user")
 
-@router.post("/{user_id}/cards", response_model=UserCard, status_code=201)
+@router.post("/{user_id}/cards", response_model=dict, status_code=201)
 async def add_card_to_user_route(
     user_id: str = Path(...),
-    card_reference: str = Query(..., description="The reference to the card to add (e.g., 'GlobalCards/checkout')"),
     collection_metadata_id: str = Query(..., description="The ID of the collection metadata to use for the subcollection"),
+    card_request: CardReferencesRequest = Body(..., description="Request body containing card references"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
-    Add a card to a user's collection.
+    Add one or multiple cards to a user's collection.
 
     This endpoint:
-    1. Takes a card reference and collection_metadata_id as arguments
-    2. Gets all card information from the reference
-    3. Adds the card to the user's collection with the following fields:
+    1. Takes a list of card_references in the request body
+    2. Requires collection_metadata_id as a query parameter
+    3. Gets all card information from the references
+    4. Adds the cards to the user's collection with the following fields:
        - card_reference
        - card_name
        - date_got (timestamp)
@@ -62,49 +67,27 @@ async def add_card_to_user_route(
        - image_url
        - point_worth
        - rarity
-    4. If point_worth is less than 1000, also adds:
+    5. If point_worth is less than 1000, also adds:
        - expireAt (timestamp)
        - buybackexpiresAt (timestamp)
-    5. Creates a subcollection under the card using collection_metadata_id and puts the card there
+    6. Creates a subcollection under the card using collection_metadata_id and puts the card there
+    7. Returns a success message
     """
     try:
-        added_card = await add_card_to_user(user_id, card_reference, db, collection_metadata_id)
-        return added_card
+        # Process cards from request body
+        result = await add_multiple_cards_to_user(
+            user_id, 
+            card_request.card_references, 
+            db, 
+            collection_metadata_id
+        )
+        return {"message": result}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error adding card to user: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An error occurred while adding the card to the user")
+        logger.error(f"Error adding card(s) to user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while adding the card(s) to the user")
 
-@router.post("/{user_id}/cards/multiple", response_model=list, status_code=201)
-async def add_multiple_cards_to_user_route(
-    user_id: str = Path(...),
-    cards: list = Body(..., description="List of cards to add, in the same format as returned by draw_multiple_cards_from_pack"),
-    collection_metadata_id: str = Query(..., description="The ID of the collection metadata to use for the subcollection"),
-    db: firestore.AsyncClient = Depends(get_firestore_client)
-):
-    """
-    Add multiple cards to a user's collection.
-
-    This endpoint:
-    1. Takes a list of cards and collection_metadata_id as arguments
-    2. The cards list should be in the same format as returned by draw_multiple_cards_from_pack
-    3. For each card in the list:
-       - Gets all card information from the card_reference
-       - Adds the card to the user's collection
-    4. Returns a list of all added cards
-
-    The cards list should contain objects with at least the following field:
-    - card_reference: The reference to the card to add (e.g., 'GlobalCards/checkout')
-    """
-    try:
-        added_cards = await add_multiple_cards_to_user(user_id, cards, db, collection_metadata_id)
-        return added_cards
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error adding multiple cards to user: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An error occurred while adding multiple cards to the user")
 
 @router.get("/{user_id}/cards", response_model=UserCardsResponse)
 async def get_user_cards_route(
@@ -177,11 +160,12 @@ async def draw_card_route(
         logger.error(f"Error drawing card from pack: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while drawing a card from the pack")
 
-@router.post("/draw-multiple-cards/{collection_id}/{pack_id}", response_model=dict)
+@router.post("/{user_id}/draw-multiple-cards/{collection_id}/{pack_id}", response_model=List[DrawnCard])
 async def draw_multiple_cards_route(
+    user_id: str = Path(..., description="The ID of the user to add the cards to"),
     collection_id: str = Path(..., description="The ID of the collection containing the pack"),
     pack_id: str = Path(..., description="The ID of the pack to draw from"),
-    count: int = Query(5, description="The number of cards to draw (5 or 10)"),
+    count: int = Query(1, description="The number of cards to draw (1, 5 or 10)"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
@@ -192,13 +176,12 @@ async def draw_multiple_cards_route(
     2. Randomly chooses multiple card ids based on these probabilities
     3. Retrieves the card information from the cards subcollection for each card
     4. Logs the card information
-    5. Generates signed URLs for the card images if they're GCS URIs
-    6. Returns a dictionary containing:
-       - A success message
-       - A list of drawn cards with their details
+    5. Returns a list of dictionaries containing the drawn card data
+
+    Note: This endpoint only draws the cards and returns the result. It does not add the cards to the user's collection.
     """
     try:
-        result = await draw_multiple_cards_from_pack(collection_id, pack_id, db, count)
+        result = await draw_multiple_cards_from_pack(collection_id, pack_id, user_id, db, count)
         return result
     except HTTPException:
         raise
@@ -226,7 +209,7 @@ async def destroy_card_route(
     4. If remaining quantity is 0, removes the card from the user's collection
     5. Otherwise, decrements the card's quantity
     6. Adds the appropriate amount of points to the user's pointsBalance
-    7. Returns the updated user and the card
+    7. Returns a success message
     """
     try:
         updated_user, destroyed_card = await destroy_card(
@@ -243,12 +226,10 @@ async def destroy_card_route(
         if destroyed_card.quantity == 0:
             message = f"Successfully destroyed card {card_id} and added {points_added} points to balance"
         else:
-            message = f"Successfully destroyed {quantity} of card {card_id} and added {points_added} points to balance. Remaining quantity: {destroyed_card.quantity}"
+            message = f"Successfully destroyed {quantity} of card {card_id} and added {points_added} points to balance."
 
         return {
-            "message": message,
-            "user": updated_user.model_dump(),
-            "destroyed_card": destroyed_card.model_dump()
+            "message": message
         }
     except HTTPException:
         raise
@@ -277,7 +258,7 @@ async def withdraw_ship_card_route(
     5. Adds a request_date timestamp to the shipped card
     6. If remaining quantity is 0, removes the card from the original subcollection
     7. Otherwise, decrements the card's quantity in the original subcollection
-    8. Returns the shipped card
+    8. Returns a success message
     """
     try:
         shipped_card = await withdraw_ship_card(
@@ -295,11 +276,138 @@ async def withdraw_ship_card_route(
             message = f"Successfully shipped {quantity} of card {card_id} to the shipped subcollection. Total shipped quantity: {shipped_card.quantity}"
 
         return {
-            "message": message,
-            "shipped_card": shipped_card.model_dump()
+            "message": message
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error shipping card: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while shipping the card")
+
+@router.put("/{user_id}/email-address", response_model=dict)
+async def update_user_email_address_route(
+    user_id: str = Path(..., description="The ID of the user to update"),
+    update_data: UserEmailAddressUpdate = Body(..., description="The email and avatar to update"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Update a user's email and avatar.
+
+    This endpoint:
+    1. Takes a user ID, email, and optional avatar as arguments
+    2. Validates the email format
+    3. If avatar is provided, uploads it to Google Cloud Storage
+    4. Updates the user's email and avatar fields
+    5. Returns a success message
+
+    The avatar field can be either:
+    1. A base64 encoded image string in the format: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEA..."
+    2. Binary data (string | null)($binary)
+    """
+    try:
+        updated_user = await update_user_email_and_address(
+            user_id=user_id,
+            email=update_data.email,
+            db_client=db,
+            avatar=update_data.avatar
+        )
+        return {"message": f"Successfully updated email and avatar for user {user_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating email, addresses, and avatar for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while updating the user's email, addresses, and avatar")
+
+@router.post("/{user_id}/address", response_model=dict)
+async def add_user_address_route(
+    user_id: str = Path(..., description="The ID of the user to update"),
+    address: Address = Body(..., description="The address to add"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Add a new address to a user's addresses list.
+
+    This endpoint:
+    1. Takes a user ID and address object as arguments
+    2. Adds the address to the user's addresses list
+    3. Returns a success message
+
+    The address should have:
+    - id (optional): An identifier like "home" or "work"
+    - street: Street address
+    - city: City
+    - state: State or province
+    - zip: Postal code
+    - country: Country
+    """
+    try:
+        updated_user = await add_user_address(
+            user_id=user_id,
+            address=address,
+            db_client=db
+        )
+        address_id = address.id or f"address_{len(updated_user.addresses)}"
+        return {"message": f"Successfully added address {address_id} to user {user_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding address for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while adding the address")
+
+@router.delete("/{user_id}/address/{address_id}", response_model=dict)
+async def delete_user_address_route(
+    user_id: str = Path(..., description="The ID of the user to update"),
+    address_id: str = Path(..., description="The ID of the address to delete"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Delete an address from a user's addresses list.
+
+    This endpoint:
+    1. Takes a user ID and address ID as arguments
+    2. Deletes the address from the user's addresses list
+    3. Returns a success message
+    """
+    try:
+        updated_user = await delete_user_address(
+            user_id=user_id,
+            address_id=address_id,
+            db_client=db
+        )
+        return {"message": f"Successfully deleted address {address_id} from user {user_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting address for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while deleting the address")
+
+@router.post("/{user_id}/points", response_model=dict)
+async def add_points_to_user_route(
+    user_id: str = Path(..., description="The ID of the user to add points to"),
+    points_request: AddPointsRequest = Body(..., description="The points to add"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Add points to a user's pointsBalance.
+
+    This endpoint:
+    1. Takes a user ID and points to add as arguments
+    2. Validates that the points to add are greater than 0
+    3. Adds the points to the user's pointsBalance
+    4. Returns a success message with the updated points balance
+    """
+    try:
+        updated_user = await add_points_to_user(
+            user_id=user_id,
+            points=points_request.points,
+            db_client=db
+        )
+        return {
+            "message": f"Successfully added {points_request.points} points to user {user_id}",
+            "new_balance": updated_user.pointsBalance
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding points to user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while adding points to the user")

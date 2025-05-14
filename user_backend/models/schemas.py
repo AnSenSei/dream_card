@@ -1,7 +1,16 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from uuid import UUID
+
+class Address(BaseModel):
+    """Model for a user address"""
+    id: Optional[str] = None  # Optional identifier like "home" or "work"
+    street: str
+    city: str
+    state: str
+    zip: str
+    country: str
 
 class User(BaseModel):
     """Model for a user with all fields"""
@@ -10,6 +19,8 @@ class User(BaseModel):
     currentMonthKey: str
     displayName: str
     email: str
+    addresses: List[Address] = []  # Changed from allow_to_address to addresses
+    avatar: Optional[str] = None  # URL or path to user's avatar image
     lastMonthCash: int = 0
     lastMonthKey: str
     level: int = 1
@@ -60,6 +71,34 @@ class UserCardListResponse(BaseModel):
 class UserCardsResponse(BaseModel):
     """Response model for listing all user cards grouped by subcollection"""
     subcollections: List[UserCardListResponse]
+
+class UserEmailAddressUpdate(BaseModel):
+    """Request model for updating user email and avatar"""
+    email: str
+    avatar: Optional[str] = None  # Can be base64 encoded string or binary data
+
+class DrawnCard(BaseModel):
+    """Model for a card drawn from a pack"""
+    id: str
+    collection_id: str
+    card_reference: str
+    image_url: Optional[str] = None
+    card_name: Optional[str] = None
+    point_worth: Optional[int] = None
+    quantity: Optional[int] = None
+    rarity: Optional[int] = None
+    # Allow additional fields with any type
+    model_config = {
+        "extra": "allow"
+    }
+
+class CardReferencesRequest(BaseModel):
+    """Request model for adding multiple cards to a user"""
+    card_references: List[str]
+
+class AddPointsRequest(BaseModel):
+    """Request model for adding points to a user"""
+    points: int = Field(..., gt=0, description="The number of points to add (must be greater than 0)")
 
 class UserListResponse(BaseModel):
     """Response model for listing users"""
