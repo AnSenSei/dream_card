@@ -39,6 +39,7 @@ class UserCard(BaseModel):
     rarity: int
     expireAt: Optional[datetime] = None
     buybackexpiresAt: Optional[datetime] = None
+    request_date: Optional[datetime] = None  # Timestamp for when card was requested for shipping
 
     class Config:
         from_attributes = True

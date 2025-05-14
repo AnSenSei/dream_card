@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Path, Query
+from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body
 from typing import Optional
 from google.cloud import firestore
 
@@ -6,9 +6,12 @@ from models.schemas import User, UserCard, UserCardsResponse
 from service.user_service import (
     get_user_by_id,
     add_card_to_user,
+    add_multiple_cards_to_user,
     draw_card_from_pack,
+    draw_multiple_cards_from_pack,
     get_user_cards,
-    destroy_card
+    destroy_card,
+    withdraw_ship_card
 )
 from config import get_firestore_client, get_logger
 
@@ -72,6 +75,36 @@ async def add_card_to_user_route(
     except Exception as e:
         logger.error(f"Error adding card to user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while adding the card to the user")
+
+@router.post("/{user_id}/cards/multiple", response_model=list, status_code=201)
+async def add_multiple_cards_to_user_route(
+    user_id: str = Path(...),
+    cards: list = Body(..., description="List of cards to add, in the same format as returned by draw_multiple_cards_from_pack"),
+    collection_metadata_id: str = Query(..., description="The ID of the collection metadata to use for the subcollection"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Add multiple cards to a user's collection.
+
+    This endpoint:
+    1. Takes a list of cards and collection_metadata_id as arguments
+    2. The cards list should be in the same format as returned by draw_multiple_cards_from_pack
+    3. For each card in the list:
+       - Gets all card information from the card_reference
+       - Adds the card to the user's collection
+    4. Returns a list of all added cards
+
+    The cards list should contain objects with at least the following field:
+    - card_reference: The reference to the card to add (e.g., 'GlobalCards/checkout')
+    """
+    try:
+        added_cards = await add_multiple_cards_to_user(user_id, cards, db, collection_metadata_id)
+        return added_cards
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding multiple cards to user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while adding multiple cards to the user")
 
 @router.get("/{user_id}/cards", response_model=UserCardsResponse)
 async def get_user_cards_route(
@@ -144,6 +177,35 @@ async def draw_card_route(
         logger.error(f"Error drawing card from pack: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while drawing a card from the pack")
 
+@router.post("/draw-multiple-cards/{collection_id}/{pack_id}", response_model=dict)
+async def draw_multiple_cards_route(
+    collection_id: str = Path(..., description="The ID of the collection containing the pack"),
+    pack_id: str = Path(..., description="The ID of the pack to draw from"),
+    count: int = Query(5, description="The number of cards to draw (5 or 10)"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Draw multiple cards (5 or 10) from a pack based on probabilities.
+
+    This endpoint:
+    1. Gets all probabilities from cards.values() in the pack
+    2. Randomly chooses multiple card ids based on these probabilities
+    3. Retrieves the card information from the cards subcollection for each card
+    4. Logs the card information
+    5. Generates signed URLs for the card images if they're GCS URIs
+    6. Returns a dictionary containing:
+       - A success message
+       - A list of drawn cards with their details
+    """
+    try:
+        result = await draw_multiple_cards_from_pack(collection_id, pack_id, db, count)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error drawing multiple cards from pack: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while drawing multiple cards from the pack")
+
 @router.delete("/{user_id}/cards/{subcollection_name}/{card_id}", response_model=dict)
 async def destroy_card_route(
     user_id: str = Path(..., description="The ID of the user who owns the card"),
@@ -193,3 +255,51 @@ async def destroy_card_route(
     except Exception as e:
         logger.error(f"Error destroying card: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while destroying the card")
+
+@router.post("/{user_id}/cards/{subcollection_name}/{card_id}/ship", response_model=dict)
+async def withdraw_ship_card_route(
+    user_id: str = Path(..., description="The ID of the user who owns the card"),
+    subcollection_name: str = Path(..., description="The name of the subcollection where the card is stored"),
+    card_id: str = Path(..., description="The ID of the card to withdraw/ship"),
+    quantity: int = Query(1, description="The quantity to withdraw/ship (default: 1)"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Withdraw or ship a card from a user's collection by moving it to the "shipped" subcollection.
+    If quantity is less than the card's quantity, only move the specified quantity.
+    Only remove the card from the original subcollection if the remaining quantity is 0.
+
+    This endpoint:
+    1. Verifies the user and card exist
+    2. Gets the card's quantity
+    3. Validates the requested quantity is valid
+    4. Moves the card (or a portion of it) to the "shipped" subcollection
+    5. Adds a request_date timestamp to the shipped card
+    6. If remaining quantity is 0, removes the card from the original subcollection
+    7. Otherwise, decrements the card's quantity in the original subcollection
+    8. Returns the shipped card
+    """
+    try:
+        shipped_card = await withdraw_ship_card(
+            user_id=user_id,
+            card_id=card_id,
+            subcollection_name=subcollection_name,
+            db_client=db,
+            quantity=quantity
+        )
+
+        # Create appropriate message based on whether card was completely moved
+        if shipped_card.quantity == quantity:
+            message = f"Successfully shipped all {quantity} of card {card_id} to the shipped subcollection"
+        else:
+            message = f"Successfully shipped {quantity} of card {card_id} to the shipped subcollection. Total shipped quantity: {shipped_card.quantity}"
+
+        return {
+            "message": message,
+            "shipped_card": shipped_card.model_dump()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error shipping card: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while shipping the card")
