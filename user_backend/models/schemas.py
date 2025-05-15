@@ -12,6 +12,15 @@ class Address(BaseModel):
     zip: str
     country: str
 
+class CreateAccountRequest(BaseModel):
+    """Request model for creating a new user account"""
+    email: str
+    displayName: str = "AnSenSei"
+    avatar: Optional[str] = None  # URL or path to user's avatar image
+    addresses: List[Address] = []
+    currentMonthKey: Optional[str] = None
+    lastMonthKey: Optional[str] = None
+
 class User(BaseModel):
     """Model for a user with all fields"""
     createdAt: datetime
@@ -99,6 +108,22 @@ class CardReferencesRequest(BaseModel):
 class AddPointsRequest(BaseModel):
     """Request model for adding points to a user"""
     points: int = Field(..., gt=0, description="The number of points to add (must be greater than 0)")
+
+class PerformFusionRequest(BaseModel):
+    """Request model for performing fusion"""
+    result_card_id: str = Field(..., description="The ID of the fusion recipe to use")
+
+class PerformFusionResponse(BaseModel):
+    """Response model for fusion result"""
+    success: bool
+    message: str
+    result_card: Optional[UserCard] = None
+
+class RandomFusionRequest(BaseModel):
+    """Request model for performing random fusion"""
+    card_id1: str = Field(..., description="The ID of the first card to fuse")
+    card_id2: str = Field(..., description="The ID of the second card to fuse")
+    collection_id: str = Field(..., description="The collection ID of both cards")
 
 class UserListResponse(BaseModel):
     """Response model for listing users"""

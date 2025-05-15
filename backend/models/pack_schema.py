@@ -12,6 +12,7 @@ class CardPack(BaseModel):
     name: str
     image_url: Optional[str] = None
     win_rate: Optional[int] = None
+    popularity: Optional[int] = 0
 
 class AddPackRequest(BaseModel):
     """
@@ -21,6 +22,7 @@ class AddPackRequest(BaseModel):
     collection_id: str
     win_rate: Optional[int] = None
     is_active: bool = False
+    popularity: Optional[int] = 0
 
 class CardInPack(BaseModel):
     """
@@ -67,6 +69,7 @@ class UpdatePackRequest(BaseModel):
     description: Optional[str] = None
     rarities: Optional[Dict[str, Dict[str, Any]]] = None
     win_rate: Optional[int] = None
+    popularity: Optional[int] = None
 
 
 class AddCardToPackDirectRequest(BaseModel):

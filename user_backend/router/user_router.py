@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body
 from typing import Optional, List
 from google.cloud import firestore
 
-from models.schemas import User, UserCard, UserCardsResponse, UserEmailAddressUpdate, Address, DrawnCard, CardReferencesRequest, AddPointsRequest
+from models.schemas import User, UserCard, UserCardsResponse, UserEmailAddressUpdate, Address, DrawnCard, CardReferencesRequest, AddPointsRequest, CreateAccountRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest
 from service.user_service import (
     get_user_by_id,
     add_card_to_user,
@@ -15,7 +15,10 @@ from service.user_service import (
     update_user_email_and_address,
     add_user_address,
     delete_user_address,
-    add_points_to_user
+    add_points_to_user,
+    create_account,
+    perform_fusion,
+    perform_random_fusion
 )
 from config import get_firestore_client, get_logger
 
@@ -25,6 +28,48 @@ router = APIRouter(
     prefix="/users",
     tags=["users"],
 )
+
+@router.post("/create-account", response_model=User, status_code=201)
+async def create_account_route(
+    request: CreateAccountRequest = Body(..., description="User account data"),
+    user_id: Optional[str] = Query(None, description="Optional user ID. If not provided, a new UUID will be generated."),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Create a new user account with the specified fields and default values.
+
+    This endpoint:
+    1. Takes user account data as input
+    2. Creates a new user document in Firestore with the specified fields and default values
+    3. Returns the created User object
+
+    The following fields are required:
+    - email: User's email address
+
+    The following fields have default values if not provided:
+    - displayName: "AnSenSei"
+    - addresses: [] (empty array)
+    - avatar: null
+    - currentMonthKey: Current month in format "YYYY-MM"
+    - lastMonthKey: Last month in format "YYYY-MM"
+
+    The following fields are automatically set:
+    - createdAt: Current timestamp
+    - currentMonthCash: 0
+    - lastMonthCash: 0
+    - level: 1
+    - pointsBalance: 0
+    - totalCashRecharged: 0
+    - totalPointsSpent: 0
+    """
+    try:
+        user = await create_account(request, db, user_id)
+        return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating user account: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while creating the user account")
 
 @router.get("/{user_id}", response_model=User)
 async def get_user_route(
@@ -411,3 +456,92 @@ async def add_points_to_user_route(
     except Exception as e:
         logger.error(f"Error adding points to user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while adding points to the user")
+
+@router.post("/{user_id}/fusion", response_model=PerformFusionResponse)
+async def perform_fusion_route(
+    user_id: str = Path(..., description="The ID of the user performing the fusion"),
+    fusion_request: PerformFusionRequest = Body(..., description="The fusion recipe to use"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Perform a fusion operation for a user.
+
+    This endpoint:
+    1. Takes a user ID and fusion recipe ID as arguments
+    2. Checks if the user has all required ingredients for the fusion
+    3. If yes, performs the fusion by removing ingredient cards and adding the result card
+    4. If no, returns an error message about missing cards
+    5. Returns a success/failure message and the resulting card if successful
+    """
+    try:
+        fusion_result = await perform_fusion(
+            user_id=user_id,
+            result_card_id=fusion_request.result_card_id,
+            db_client=db
+        )
+        return fusion_result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error performing fusion for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while performing the fusion")
+
+@router.post("/{user_id}/fusion_recipes/{result_card_id}", response_model=PerformFusionResponse)
+async def perform_fusion_by_recipe_id_route(
+    user_id: str = Path(..., description="The ID of the user performing the fusion"),
+    result_card_id: str = Path(..., description="The ID of the fusion recipe to use"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Perform a fusion operation for a user using a specific recipe ID in the URL path.
+
+    This endpoint:
+    1. Takes a user ID and fusion recipe ID as path parameters
+    2. Checks if the user has all required ingredients for the fusion
+    3. If yes, performs the fusion by removing ingredient cards and adding the result card
+    4. If no, returns an error message about missing cards
+    5. Returns a success/failure message and the resulting card if successful
+    """
+    try:
+        fusion_result = await perform_fusion(
+            user_id=user_id,
+            result_card_id=result_card_id,
+            db_client=db
+        )
+        return fusion_result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error performing fusion for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while performing the fusion")
+
+@router.post("/{user_id}/random-fusion", response_model=PerformFusionResponse)
+async def perform_random_fusion_route(
+    user_id: str = Path(..., description="The ID of the user performing the random fusion"),
+    fusion_request: RandomFusionRequest = Body(..., description="The cards to fuse"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Perform a random fusion operation for a user.
+
+    This endpoint:
+    1. Takes a user ID and two card IDs with their collection
+    2. Verifies both cards have point_worth < 500
+    3. Calculates the combined point_worth and determines the valid range (0.75-0.90)
+    4. Randomly selects a card from the same collection with point_worth in that range
+    5. Removes the ingredient cards from the user's collection
+    6. Adds the result card to the user's collection
+    7. Returns a success/failure message and the resulting card if successful
+    """
+    try:
+        fusion_result = await perform_random_fusion(
+            user_id=user_id,
+            fusion_request=fusion_request,
+            db_client=db
+        )
+        return fusion_result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error performing random fusion for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while performing the random fusion")

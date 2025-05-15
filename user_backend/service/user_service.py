@@ -8,10 +8,10 @@ from datetime import datetime, timedelta
 from fastapi import HTTPException
 import httpx
 from google.cloud import firestore
-from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_transactional
+from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_transactional, Increment
 
 from config import get_logger, settings
-from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address
+from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs
 
 logger = get_logger(__name__)
@@ -126,6 +126,7 @@ async def draw_card_from_pack(collection_id: str, pack_id: str, db_client: Async
     2. Randomly chooses a card id based on these probabilities
     3. Retrieves the card information from the cards subcollection
     4. Logs the card information and returns a success message
+    5. Increments the popularity field of the pack by 1
 
     Args:
         collection_id: The ID of the collection containing the pack
@@ -194,6 +195,14 @@ async def draw_card_from_pack(collection_id: str, pack_id: str, db_client: Async
             signed_url = await generate_signed_url(image_url)
             logger.info(f"  Generated signed URL for image: {signed_url}")
 
+        # Increment the popularity field of the pack by 1
+        try:
+            await pack_ref.update({"popularity": Increment(1)})
+            logger.info(f"Incremented popularity for pack '{pack_id}' in collection '{collection_id}'")
+        except Exception as e:
+            logger.error(f"Failed to increment popularity for pack '{pack_id}' in collection '{collection_id}': {e}")
+            # Continue even if updating popularity fails
+
         # Return a dictionary with the signed URL and point_worth
         return {
             "message": f"Successfully drew card '{chosen_card_id}' from pack '{pack_id}' in collection '{collection_id}'",
@@ -208,13 +217,14 @@ async def draw_card_from_pack(collection_id: str, pack_id: str, db_client: Async
 
 async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_id: str, db_client: AsyncClient, count: int = 5) -> list:
     """
-    Draw multiple cards (5 or 10) from a pack based on probabilities.
+    Draw multiple cards (1,5 or 10) from a pack based on probabilities.
 
     This function:
     1. Gets all probabilities from cards.values() in the pack
     2. Randomly chooses multiple card ids based on these probabilities
     3. Retrieves the card information from the cards subcollection for each card
     4. Logs the card information and returns the list of drawn cards
+    5. Increments the popularity field of the pack by the number of cards drawn
 
     Args:
         collection_id: The ID of the collection containing the pack
@@ -392,6 +402,15 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
             drawn_cards.append(simplified_card)
 
         logger.info(f"Successfully drew {len(drawn_cards)} cards from pack '{pack_id}' in collection '{collection_id}'")
+
+        # Increment the popularity field of the pack by the number of cards drawn
+        try:
+            await pack_ref.update({"popularity": Increment(len(drawn_cards))})
+            logger.info(f"Incremented popularity for pack '{pack_id}' in collection '{collection_id}' by {len(drawn_cards)}")
+        except Exception as e:
+            logger.error(f"Failed to increment popularity for pack '{pack_id}' in collection '{collection_id}': {e}")
+            # Continue even if updating popularity fails
+
         return drawn_cards
     except HTTPException as e:
         raise e
@@ -1079,6 +1098,507 @@ async def add_points_to_user(user_id: str, points: int, db_client: AsyncClient) 
     except Exception as e:
         logger.error(f"Error adding points to user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to add points to user: {str(e)}")
+
+async def create_account(request: CreateAccountRequest, db_client: AsyncClient, user_id: Optional[str] = None) -> User:
+    """
+    Create a new user account with the specified fields and default values.
+
+    Args:
+        request: The CreateAccountRequest object containing user data
+        db_client: Firestore client
+        user_id: Optional user ID. If not provided, a new UUID will be generated.
+
+    Returns:
+        The created User object
+
+    Raises:
+        HTTPException: If there's an error creating the user
+    """
+    try:
+        # Generate a unique user ID if not provided
+        if not user_id:
+            user_id = str(UUID.uuid4())
+
+        # Validate email format
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_pattern, request.email):
+            raise HTTPException(status_code=400, detail="Invalid email format")
+
+        # Get current timestamp
+        now = datetime.now()
+
+        # Generate current month key and last month key if not provided
+        current_month_key = request.currentMonthKey or f"{now.year}-{now.month:02d}"
+        last_month_key = request.lastMonthKey
+        if not last_month_key:
+            # Calculate last month
+            if now.month == 1:
+                last_month = 12
+                last_year = now.year - 1
+            else:
+                last_month = now.month - 1
+                last_year = now.year
+            last_month_key = f"{last_year}-{last_month:02d}"
+
+        # Handle avatar upload if provided
+        avatar_url = request.avatar
+        if avatar_url and not avatar_url.startswith(('http://', 'https://', 'gs://')):
+            try:
+                # Upload avatar to GCS
+                avatar_url = await upload_avatar_to_gcs(avatar_url, user_id)
+            except Exception as e:
+                logger.error(f"Error uploading avatar for user {user_id}: {e}", exc_info=True)
+                # Continue with account creation even if avatar upload fails
+                avatar_url = None
+
+        # Convert Address objects to dictionaries for Firestore
+        addresses = [address.model_dump() for address in request.addresses]
+
+        # Create user data
+        user_data = {
+            "createdAt": now,
+            "currentMonthCash": 0,
+            "currentMonthKey": current_month_key,
+            "displayName": request.displayName,
+            "email": request.email,
+            "addresses": addresses,
+            "avatar": avatar_url,
+            "lastMonthCash": 0,
+            "lastMonthKey": last_month_key,
+            "level": 1,
+            "pointsBalance": 0,
+            "totalCashRecharged": 0,
+            "totalPointsSpent": 0
+        }
+
+        # Create user document in Firestore
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        await user_ref.set(user_data)
+
+        # Get the created user
+        user_doc = await user_ref.get()
+        user_data = user_doc.to_dict()
+        user = User(**user_data)
+
+        logger.info(f"Created new user account with ID {user_id}")
+        return user
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error creating user account: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create user account: {str(e)}")
+
+async def perform_fusion(
+    user_id: str,
+    result_card_id: str,
+    db_client: AsyncClient
+) -> PerformFusionResponse:
+    """
+    Perform a fusion operation for a user.
+
+    This function:
+    1. Retrieves the fusion recipe from Firestore
+    2. Checks if the user has all required ingredients
+    3. Removes the ingredient cards from the user's collection
+    4. Adds the result card to the user's collection
+
+    Args:
+        user_id: The ID of the user performing the fusion
+        result_card_id: The ID of the fusion recipe to use
+        db_client: Firestore client
+
+    Returns:
+        PerformFusionResponse with success status, message, and the resulting card
+
+    Raises:
+        HTTPException: If there's an error performing the fusion
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the fusion recipe
+        recipe_ref = db_client.collection('fusion_recipes').document(result_card_id)
+        recipe_doc = await recipe_ref.get()
+
+        if not recipe_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Fusion recipe with ID '{result_card_id}' not found")
+
+        recipe_data = recipe_doc.to_dict()
+
+        # Check if the user has all required ingredients
+        ingredients = recipe_data.get('ingredients', [])
+        missing_ingredients = []
+
+        for ingredient in ingredients:
+            card_collection_id = ingredient.get('card_collection_id')
+            card_id = ingredient.get('card_id')
+            required_quantity = ingredient.get('quantity', 1)
+
+            # Check if the user has this card in their collection
+            card_ref = user_ref.collection('cards').document('cards').collection(card_collection_id).document(card_id)
+            card_doc = await card_ref.get()
+
+            if not card_doc.exists:
+                missing_ingredients.append(f"{card_collection_id}/{card_id}")
+                continue
+
+            # Check if the user has enough quantity
+            card_data = card_doc.to_dict()
+            user_quantity = card_data.get('quantity', 0)
+
+            if user_quantity < required_quantity:
+                missing_ingredients.append(f"{card_collection_id}/{card_id} (have {user_quantity}, need {required_quantity})")
+
+        # If there are missing ingredients, return an error
+        if missing_ingredients:
+            return PerformFusionResponse(
+                success=False,
+                message=f"Missing ingredients for fusion: {', '.join(missing_ingredients)}",
+                result_card=None
+            )
+
+        # All ingredients are available, perform the fusion
+        # 1. Remove the ingredients from the user's collection
+        for ingredient in ingredients:
+            card_collection_id = ingredient.get('card_collection_id')
+            card_id = ingredient.get('card_id')
+            required_quantity = ingredient.get('quantity', 1)
+
+            # Get the card from the user's collection
+            card_ref = user_ref.collection('cards').document('cards').collection(card_collection_id).document(card_id)
+            card_doc = await card_ref.get()
+            card_data = card_doc.to_dict()
+
+            user_quantity = card_data.get('quantity', 0)
+            remaining_quantity = user_quantity - required_quantity
+
+            if remaining_quantity <= 0:
+                # Delete the card if no quantity remains
+                await card_ref.delete()
+
+                # Also delete from the main cards collection if it exists
+                main_card_ref = user_ref.collection('cards').document(card_id)
+                main_card_doc = await main_card_ref.get()
+                if main_card_doc.exists:
+                    await main_card_ref.delete()
+            else:
+                # Update the quantity
+                await card_ref.update({"quantity": remaining_quantity})
+
+                # Also update in the main cards collection if it exists
+                main_card_ref = user_ref.collection('cards').document(card_id)
+                main_card_doc = await main_card_ref.get()
+                if main_card_doc.exists:
+                    await main_card_ref.update({"quantity": remaining_quantity})
+
+        # 2. Add the result card to the user's collection
+        card_collection_id = recipe_data.get('card_collection_id')
+        card_reference = recipe_data.get('card_reference')
+
+        # Parse the card_reference to get the actual collection name
+        try:
+            collection_name, card_id = card_reference.split('/')
+            logger.info(f"Parsed card_reference '{card_reference}' to collection '{collection_name}' and card_id '{card_id}'")
+        except ValueError:
+            logger.error(f"Invalid card reference format: {card_reference}. Expected 'collection/card_id'.")
+            raise HTTPException(status_code=400, detail=f"Invalid card reference format: {card_reference}")
+
+        # Add the result card to the user's collection
+        # Use the collection name from the card_reference as the subcollection name
+        await add_card_to_user(
+            user_id=user_id,
+            card_reference=card_reference,
+            db_client=db_client,
+            collection_metadata_id=card_collection_id
+        )
+
+        # 3. Get the added card to return in the response
+        # Use the collection name from the card_reference as the subcollection name
+        result_card_ref = user_ref.collection('cards').document('cards').collection(card_collection_id).document(card_id)
+        result_card_doc = await result_card_ref.get()
+
+        if not result_card_doc.exists:
+            # This shouldn't happen, but just in case
+            return PerformFusionResponse(
+                success=True,
+                message=f"Fusion successful, but couldn't retrieve the result card",
+                result_card=None
+            )
+
+        result_card_data = result_card_doc.to_dict()
+
+        # Generate signed URL for the card image
+        if 'image_url' in result_card_data and result_card_data['image_url']:
+            try:
+                result_card_data['image_url'] = await generate_signed_url(result_card_data['image_url'])
+            except Exception as sign_error:
+                logger.error(f"Failed to generate signed URL for {result_card_data['image_url']}: {sign_error}")
+                # Keep the original URL if signing fails
+
+        # Create a UserCard object from the result card data
+        result_card = UserCard(**result_card_data)
+
+        return PerformFusionResponse(
+            success=True,
+            message=f"Fusion successful! Created {result_card_id}",
+            result_card=result_card
+        )
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error performing fusion for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to perform fusion: {str(e)}")
+
+async def perform_random_fusion(
+    user_id: str,
+    fusion_request: RandomFusionRequest,
+    db_client: AsyncClient
+) -> PerformFusionResponse:
+    """
+    Perform a random fusion operation for a user.
+
+    This function:
+    1. Verifies the user has both cards and they have point_worth < 500
+    2. Calculates the combined point_worth and determines the valid range (0.75-0.90)
+    3. Queries Firestore for cards in the same collection with point_worth in that range
+    4. Randomly selects one of those cards as the result
+    5. Removes the ingredient cards from the user's collection
+    6. Adds the result card to the user's collection
+
+    Args:
+        user_id: The ID of the user performing the fusion
+        fusion_request: The RandomFusionRequest containing card IDs and collection
+        db_client: Firestore client
+
+    Returns:
+        PerformFusionResponse with success status, message, and the resulting card
+
+    Raises:
+        HTTPException: If there's an error performing the fusion
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the cards from the user's collection
+        card1_ref = user_ref.collection('cards').document('cards').collection(fusion_request.collection_id).document(fusion_request.card_id1)
+        card2_ref = user_ref.collection('cards').document('cards').collection(fusion_request.collection_id).document(fusion_request.card_id2)
+
+        card1_doc = await card1_ref.get()
+        card2_doc = await card2_ref.get()
+
+        # Check if the cards exist
+        if not card1_doc.exists:
+            return PerformFusionResponse(
+                success=False,
+                message=f"Card {fusion_request.card_id1} not found in your collection",
+                result_card=None
+            )
+
+        if not card2_doc.exists:
+            return PerformFusionResponse(
+                success=False,
+                message=f"Card {fusion_request.card_id2} not found in your collection",
+                result_card=None
+            )
+
+        # Check if the cards are different
+        if fusion_request.card_id1 == fusion_request.card_id2:
+            return PerformFusionResponse(
+                success=False,
+                message="Cannot fuse the same card with itself",
+                result_card=None
+            )
+
+        # Get the card data
+        card1_data = card1_doc.to_dict()
+        card2_data = card2_doc.to_dict()
+
+        # Check if the cards have point_worth < 500
+        card1_point_worth = card1_data.get('point_worth', 0)
+        card2_point_worth = card2_data.get('point_worth', 0)
+
+        if card1_point_worth >= 500:
+            return PerformFusionResponse(
+                success=False,
+                message=f"Card {fusion_request.card_id1} has point_worth {card1_point_worth}, which is >= 500",
+                result_card=None
+            )
+
+        if card2_point_worth >= 500:
+            return PerformFusionResponse(
+                success=False,
+                message=f"Card {fusion_request.card_id2} has point_worth {card2_point_worth}, which is >= 500",
+                result_card=None
+            )
+
+        # Calculate the combined point_worth and determine the valid range
+        combined_point_worth = card1_point_worth + card2_point_worth
+        min_point_worth = int(combined_point_worth * 0.75)
+        max_point_worth = int(combined_point_worth * 0.90)
+
+        logger.info(f"Combined point_worth: {combined_point_worth}, valid range: {min_point_worth} - {max_point_worth}")
+
+        # Extract the collection name from the card_reference of one of the cards
+        collection_name = fusion_request.collection_id  # Default fallback
+
+        # Try to get card_reference from card1 first
+        if 'card_reference' in card1_data:
+            try:
+                # Parse the card_reference to get the collection name
+                collection_name, _ = card1_data['card_reference'].split('/')
+                logger.info(f"Extracted collection name '{collection_name}' from card1 reference: {card1_data['card_reference']}")
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Failed to extract collection name from card1 reference: {e}")
+
+        # If we couldn't get it from card1, try card2
+        elif 'card_reference' in card2_data:
+            try:
+                # Parse the card_reference to get the collection name
+                collection_name, _ = card2_data['card_reference'].split('/')
+                logger.info(f"Extracted collection name '{collection_name}' from card2 reference: {card2_data['card_reference']}")
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Failed to extract collection name from card2 reference: {e}")
+
+        # Query Firestore for cards in the extracted collection with point_worth in the valid range
+        collection_ref = db_client.collection(collection_name)
+        logger.info(f"Querying collection: {collection_name}")
+
+        # Use where method for filtering
+        query = collection_ref.where("point_worth", ">=", min_point_worth).where("point_worth", "<=", max_point_worth)
+
+        # Execute the query
+        cards_stream = query.stream()
+
+        # Collect all valid cards
+        valid_cards = []
+        async for card_doc in cards_stream:
+            # Print out the document for debugging
+            logger.info(f"Found document: {card_doc.id}, data: {card_doc.to_dict()}")
+            card_data = card_doc.to_dict()
+            # Only include cards with point_worth > 0
+            if card_data.get('point_worth', 0) > 0:
+                valid_cards.append({
+                    'id': card_doc.id,
+                    'data': card_data
+                })
+
+        # Check if there are any valid cards
+        if not valid_cards:
+            return PerformFusionResponse(
+                success=False,
+                message=f"No valid cards found in collection {collection_name} with point_worth between {min_point_worth} and {max_point_worth}",
+                result_card=None
+            )
+
+        # Randomly select one of the valid cards
+        result_card_info = random.choice(valid_cards)
+        result_card_id = result_card_info['id']
+        result_card_data = result_card_info['data']
+
+        logger.info(f"Randomly selected card {result_card_id} with point_worth {result_card_data.get('point_worth', 0)}")
+
+        # Remove the ingredient cards from the user's collection
+        # First card
+        card1_quantity = card1_data.get('quantity', 0)
+        remaining_quantity1 = card1_quantity - 1
+
+        if remaining_quantity1 <= 0:
+            # Delete the card if no quantity remains
+            await card1_ref.delete()
+
+            # Also delete from the main cards collection if it exists
+            main_card1_ref = user_ref.collection('cards').document(fusion_request.card_id1)
+            main_card1_doc = await main_card1_ref.get()
+            if main_card1_doc.exists:
+                await main_card1_ref.delete()
+        else:
+            # Update the quantity
+            await card1_ref.update({"quantity": remaining_quantity1})
+
+            # Also update in the main cards collection if it exists
+            main_card1_ref = user_ref.collection('cards').document(fusion_request.card_id1)
+            main_card1_doc = await main_card1_ref.get()
+            if main_card1_doc.exists:
+                await main_card1_ref.update({"quantity": remaining_quantity1})
+
+        # Second card
+        card2_quantity = card2_data.get('quantity', 0)
+        remaining_quantity2 = card2_quantity - 1
+
+        if remaining_quantity2 <= 0:
+            # Delete the card if no quantity remains
+            await card2_ref.delete()
+
+            # Also delete from the main cards collection if it exists
+            main_card2_ref = user_ref.collection('cards').document(fusion_request.card_id2)
+            main_card2_doc = await main_card2_ref.get()
+            if main_card2_doc.exists:
+                await main_card2_ref.delete()
+        else:
+            # Update the quantity
+            await card2_ref.update({"quantity": remaining_quantity2})
+
+            # Also update in the main cards collection if it exists
+            main_card2_ref = user_ref.collection('cards').document(fusion_request.card_id2)
+            main_card2_doc = await main_card2_ref.get()
+            if main_card2_doc.exists:
+                await main_card2_ref.update({"quantity": remaining_quantity2})
+
+        # Add the result card to the user's collection
+        card_reference = f"{collection_name}/{result_card_id}"
+
+        await add_card_to_user(
+            user_id=user_id,
+            card_reference=card_reference,
+            db_client=db_client,
+            collection_metadata_id=collection_name
+        )
+
+        # Get the added card to return in the response
+        result_card_ref = user_ref.collection('cards').document('cards').collection(collection_name).document(result_card_id)
+        result_card_doc = await result_card_ref.get()
+
+        if not result_card_doc.exists:
+            # This shouldn't happen, but just in case
+            return PerformFusionResponse(
+                success=True,
+                message=f"Random fusion successful, but couldn't retrieve the result card",
+                result_card=None
+            )
+
+        result_card_data = result_card_doc.to_dict()
+
+        # Generate signed URL for the card image
+        if 'image_url' in result_card_data and result_card_data['image_url']:
+            try:
+                result_card_data['image_url'] = await generate_signed_url(result_card_data['image_url'])
+            except Exception as sign_error:
+                logger.error(f"Failed to generate signed URL for {result_card_data['image_url']}: {sign_error}")
+                # Keep the original URL if signing fails
+
+        # Create a UserCard object from the result card data
+        result_card = UserCard(**result_card_data)
+
+        return PerformFusionResponse(
+            success=True,
+            message=f"Random fusion successful! Created {result_card_id} with point_worth {result_card.point_worth}",
+            result_card=result_card
+        )
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error performing random fusion for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to perform random fusion: {str(e)}")
 
 async def delete_user_address(user_id: str, address_id: str, db_client: AsyncClient) -> str:
     """

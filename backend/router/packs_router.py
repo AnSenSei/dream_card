@@ -9,6 +9,7 @@ from models.pack_schema import (
     AddCardToPackDirectRequest,
     DeleteCardFromPackRequest
 )
+from models.schemas import StoredCardInfo
 from service.packs_service import (
     create_pack_in_firestore,
     get_all_packs_from_firestore,
@@ -19,7 +20,8 @@ from service.packs_service import (
     add_card_direct_to_pack,
     delete_card_from_pack,
     activate_pack_in_firestore,
-    delete_pack_in_firestore
+    delete_pack_in_firestore,
+    get_all_cards_in_pack
 )
 from config import get_firestore_client, get_storage_client, settings, get_logger
 from google.cloud import firestore, storage
@@ -76,6 +78,7 @@ async def add_pack_route(
     pack_name: str = Form(...),
     collection_id: str = Form(...),
     win_rate: Optional[int] = Form(None),
+    popularity: Optional[int] = Form(None),
     db: firestore.AsyncClient = Depends(get_firestore_client),
     storage_client: storage.Client = Depends(get_storage_client),
     image_file: Optional[UploadFile] = File(None)
@@ -86,6 +89,8 @@ async def add_pack_route(
 
     - **pack_name**: Name of the new pack (sent as form field).
     - **collection_id**: ID of the pack collection (sent as form field).
+    - **win_rate**: Optional win rate for the pack (sent as form field).
+    - **popularity**: Optional popularity value for the pack (sent as form field). Defaults to 0 if not provided.
     - **image_file**: Optional image file for the pack.
     """
     try:
@@ -93,7 +98,8 @@ async def add_pack_route(
             pack_name=pack_name,
             collection_id=collection_id,
             win_rate=win_rate,
-            is_active=False
+            is_active=False,
+            popularity=popularity
         )
 
         pack_id = await create_pack_in_firestore(pack_request_model, db, storage_client, image_file)
@@ -101,6 +107,7 @@ async def add_pack_route(
             "pack_id": pack_id, 
             "pack_name": pack_name,
             "collection_id": collection_id,
+            "popularity": str(popularity if popularity is not None else 0),
             "message": f"Pack '{pack_name}' created successfully in collection '{collection_id}'"
         }
     except ValueError as e:
@@ -252,6 +259,41 @@ async def activate_pack_route(
     except Exception as e:
         logger.error(f"Unhandled error in activate_pack_route: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while activating the pack.")
+
+@router.get("/{collection_id}/{pack_id}/cards", response_model=List[StoredCardInfo])
+async def get_pack_cards_route(
+    collection_id: str,
+    pack_id: str,
+    sort_by: str = "point_worth",
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Gets all cards in a pack, sorted by the specified field in descending order.
+    Default sort is by point_worth in descending order.
+
+    Args:
+        collection_id: The ID of the pack collection containing the pack
+        pack_id: The ID of the pack to get cards from
+        sort_by: Field to sort by, either "point_worth" (default) or "rarity"
+        db: Firestore client dependency
+
+    Returns:
+        List of StoredCardInfo objects representing all cards in the pack, sorted by the specified field in descending order
+    """
+    try:
+        cards = await get_all_cards_in_pack(
+            collection_id=collection_id,
+            pack_id=pack_id,
+            db_client=db,
+            sort_by=sort_by
+        )
+        return cards
+    except HTTPException:
+        # Re-raise HTTPExceptions from the service layer
+        raise
+    except Exception as e:
+        logger.error(f"Unhandled error in get_pack_cards_route: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred while retrieving cards from the pack.")
 
 @router.delete("/{collection_id}/{pack_id}", response_model=Dict[str, str])
 async def delete_pack_route(

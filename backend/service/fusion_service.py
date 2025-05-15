@@ -4,7 +4,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import AsyncClient, ArrayUnion
 
 from config import get_logger
-from models.fusion_schema import FusionRecipe, FusionIngredient, CreateFusionRecipeRequest, UpdateFusionRecipeRequest
+from models.fusion_schema import FusionRecipe, FusionIngredient, FusionIngredientRequest, CreateFusionRecipeRequest, UpdateFusionRecipeRequest
 from service.storage_service import update_card_information
 
 logger = get_logger(__name__)
@@ -45,12 +45,52 @@ async def create_fusion_recipe(
             logger.warning(f"Fusion recipe with ID '{result_card_id}' already exists")
             raise HTTPException(status_code=409, detail=f"Fusion recipe with ID '{result_card_id}' already exists")
 
+        # Get collection metadata to create card_reference
+        card_reference = None
+        try:
+            from service.storage_service import get_collection_metadata
+            metadata = await get_collection_metadata(recipe_data.card_collection_id)
+            card_reference = f"{metadata.firestoreCollection}/{result_card_id}"
+            logger.info(f"Created card_reference: {card_reference}")
+        except Exception as e:
+            logger.warning(f"Could not create card_reference: {e}")
+            # If we can't get the metadata, use the card_collection_id as is
+            card_reference = f"{recipe_data.card_collection_id}/{result_card_id}"
+
+        # Get collection metadata once for all ingredients
+        from service.storage_service import get_collection_metadata
+        global_card_collection = recipe_data.card_collection_id
+        collection_name = recipe_data.card_collection_id
+
+        try:
+            metadata = await get_collection_metadata(recipe_data.card_collection_id)
+            global_card_collection = metadata.firestoreCollection
+            collection_name = metadata.firestoreCollection
+            logger.info(f"Using metadata firestoreCollection path: '{global_card_collection}' and name: '{collection_name}'")
+        except Exception as e:
+            logger.warning(f"Could not get collection metadata: {e}")
+            # If we can't get the metadata, use the card_collection_id as is
+
+        # Add card_reference to each ingredient
+        ingredients_with_reference = []
+        for ingredient in recipe_data.ingredients:
+            ingredient_data = ingredient.model_dump()
+            # Add card_collection_id to each ingredient
+            ingredient_data["card_collection_id"] = recipe_data.card_collection_id
+            # Create card_reference using the collection name
+            ingredient_data["card_reference"] = f"{collection_name}/{ingredient.card_id}"
+            logger.info(f"Created card_reference for ingredient: {ingredient_data['card_reference']}")
+
+            ingredients_with_reference.append(ingredient_data)
+
         # Create recipe document data
         recipe_doc_data = {
             "result_card_id": result_card_id,
+            "card_collection_id": recipe_data.card_collection_id,
+            "card_reference": card_reference,
             "pack_id": recipe_data.pack_id,
             "pack_collection_id": recipe_data.pack_collection_id,
-            "ingredients": [ingredient.model_dump() for ingredient in recipe_data.ingredients],
+            "ingredients": ingredients_with_reference,
             "created_at": firestore.SERVER_TIMESTAMP
         }
 
@@ -61,11 +101,12 @@ async def create_fusion_recipe(
         # Update each ingredient card with fusion information
         for ingredient in recipe_data.ingredients:
             try:
-                # Create fusion info object
+                # Create fusion info object with pack_reference instead of package_id
+                pack_reference = f"/packs/{recipe_data.pack_collection_id}/{recipe_data.pack_collection_id}/{recipe_data.pack_id}"
                 fusion_info = {
                     "fusion_id": result_card_id,  # Using result_card_id as fusion_id
                     "result_card_id": result_card_id,
-                    "package_id": recipe_data.pack_id
+                    "pack_reference": pack_reference
                 }
 
                 # Update the card with the fusion information
@@ -77,10 +118,10 @@ async def create_fusion_recipe(
                 await update_card_information(
                     document_id=ingredient.card_id,
                     update_data=update_data,
-                    collection_name=ingredient.card_collection_id
+                    collection_name=recipe_data.card_collection_id
                 )
 
-                logger.info(f"Updated card '{ingredient.card_id}' (with collection_id '{ingredient.card_collection_id}') with fusion information")
+                logger.info(f"Updated card '{ingredient.card_id}' (with collection_id '{recipe_data.card_collection_id}') with fusion information")
             except Exception as e:
                 # Log the error but continue with other ingredients
                 logger.error(f"Error updating ingredient card '{ingredient.card_id}' with fusion information: {e}", exc_info=True)
@@ -133,6 +174,8 @@ async def get_fusion_recipe_by_id(
 
         return FusionRecipe(
             result_card_id=recipe_data.get('result_card_id'),
+            card_collection_id=recipe_data.get('card_collection_id'),
+            card_reference=recipe_data.get('card_reference'),
             pack_id=recipe_data.get('pack_id'),
             pack_collection_id=recipe_data.get('pack_collection_id'),
             ingredients=ingredients
@@ -178,6 +221,8 @@ async def get_all_fusion_recipes(
 
             recipes_list.append(FusionRecipe(
                 result_card_id=recipe_data.get('result_card_id'),
+                card_collection_id=recipe_data.get('card_collection_id'),
+                card_reference=recipe_data.get('card_reference'),
                 pack_id=recipe_data.get('pack_id'),
                 pack_collection_id=recipe_data.get('pack_collection_id'),
                 ingredients=ingredients
@@ -235,20 +280,38 @@ async def update_fusion_recipe(
         if updates.pack_collection_id is not None:
             update_data['pack_collection_id'] = updates.pack_collection_id
 
+        if updates.card_collection_id is not None:
+            update_data['card_collection_id'] = updates.card_collection_id
+
+            # Update card_reference if card_collection_id is updated
+            try:
+                from service.storage_service import get_collection_metadata
+                metadata = await get_collection_metadata(updates.card_collection_id)
+                update_data['card_reference'] = f"{metadata.name}/{result_card_id}"
+                logger.info(f"Updated card_reference: {update_data['card_reference']}")
+            except Exception as e:
+                logger.warning(f"Could not update card_reference: {e}")
+                # If we can't get the metadata, use the card_collection_id as is
+                update_data['card_reference'] = f"{updates.card_collection_id}/{result_card_id}"
+
+
         # Handle ingredient updates
         if updates.added_ingredients is not None or updates.deleted_ingredients is not None:
             # Get current ingredients
             current_ingredients = current_recipe_data.get('ingredients', [])
 
+            # Use the current recipe's card_collection_id or the updated one if provided
+            card_collection_id = updates.card_collection_id or current_recipe_data.get('card_collection_id')
+
             ingredients_to_add = {
-                (ingredient.card_id, ingredient.card_collection_id)
+                (ingredient.card_id, card_collection_id)
                 for ingredient in (updates.added_ingredients or [])
             }
 
             # Create a dictionary to store the full ingredient objects for removal
             ingredients_to_remove_dict = {}
             for ingredient in (updates.deleted_ingredients or []):
-                key = (ingredient.card_id, ingredient.card_collection_id)
+                key = (ingredient.card_id, card_collection_id)
                 ingredients_to_remove_dict[key] = ingredient
 
             # Create a set of tuples for efficient set operations
@@ -256,7 +319,7 @@ async def update_fusion_recipe(
 
             # Log the ingredients to be removed for debugging
             for (card_id, card_collection_id), ingredient in ingredients_to_remove_dict.items():
-                logger.info(f"Will remove fusion information from card '{card_id}' (with collection_id '{card_collection_id}') with metadata: quantity={ingredient.quantity}, available_in_packages={ingredient.available_in_packages}")
+                logger.info(f"Will remove fusion information from card '{card_id}' (with collection_id '{card_collection_id}') with quantity={ingredient.quantity}")
 
             # Calculate the new ingredients list by removing deleted and adding new
             current_ingredient_set = {
@@ -317,7 +380,7 @@ async def update_fusion_recipe(
                                 collection_name=card_collection_id
                             )
 
-                            logger.info(f"Removed fusion information from card '{card_id}' (with collection_id '{card_collection_id}') with metadata: quantity={ingredient.quantity}, available_in_packages={ingredient.available_in_packages}")
+                            logger.info(f"Removed fusion information from card '{card_id}' (with collection_id '{card_collection_id}') with quantity={ingredient.quantity}")
                         else:
                             logger.info(f"Card '{card_id}' (with collection_id '{card_collection_id}') has no fusion information to remove")
                     except HTTPException as e:
@@ -334,11 +397,15 @@ async def update_fusion_recipe(
             # Add fusion information to new ingredients
             for card_id, card_collection_id in ingredients_to_add:
                 try:
-                    # Create fusion info object
+                    # Create fusion info object with pack_reference instead of package_id
+                    pack_id = new_pack_id or current_recipe_data.get('pack_id')
+                    pack_collection_id = updates.pack_collection_id or current_recipe_data.get('pack_collection_id')
+                    pack_reference = f"/packs/{pack_collection_id}/{pack_collection_id}/{pack_id}"
+
                     fusion_info = {
                         "fusion_id": result_card_id,
                         "result_card_id": result_card_id,
-                        "package_id": new_pack_id or current_recipe_data.get('pack_id')
+                        "pack_reference": pack_reference
                     }
 
                     # Update the card with the fusion information
@@ -357,8 +424,39 @@ async def update_fusion_recipe(
                     # Log the error but continue with other ingredients
                     logger.error(f"Error adding fusion information to ingredient card: {e}", exc_info=True)
 
-            # Update the ingredients in the recipe
-            update_data['ingredients'] = [ingredient.model_dump() for ingredient in final_ingredients]
+            # Get collection metadata once for all ingredients
+            from service.storage_service import get_collection_metadata
+            global_card_collection = card_collection_id
+            collection_name = card_collection_id
+
+            try:
+                metadata = await get_collection_metadata(card_collection_id)
+                global_card_collection = metadata.firestoreCollection
+                collection_name = metadata.name
+                logger.info(f"Using metadata firestoreCollection path: '{global_card_collection}' and name: '{collection_name}'")
+            except Exception as e:
+                logger.warning(f"Could not get collection metadata: {e}")
+                # If we can't get the metadata, use the card_collection_id as is
+
+            # Add card_reference to each ingredient and update the ingredients in the recipe
+            ingredients_with_reference = []
+            for ingredient in final_ingredients:
+                ingredient_data = ingredient.model_dump()
+
+                # If ingredient already has card_reference, use it
+                if hasattr(ingredient, 'card_reference') and ingredient.card_reference:
+                    ingredient_data["card_reference"] = ingredient.card_reference
+                else:
+                    # Create card_reference using the collection name
+                    ingredient_data["card_reference"] = f"{collection_name}/{ingredient.card_id}"
+                    logger.info(f"Created card_reference for ingredient: {ingredient_data['card_reference']}")
+
+                # Ensure card_collection_id is set correctly
+                ingredient_data["card_collection_id"] = card_collection_id
+
+                ingredients_with_reference.append(ingredient_data)
+
+            update_data['ingredients'] = ingredients_with_reference
 
         # If pack_id is updated but ingredients are not, update fusion information in all current ingredients
         elif new_pack_id is not None:
@@ -375,13 +473,20 @@ async def update_fusion_recipe(
                             card = await get_card_by_id(card_id, card_collection_id)
                             card_data = card.model_dump()
 
-                            # Update the package_id in the used_in_fusion array
+                            # Update the pack_reference in the used_in_fusion array
                             if 'used_in_fusion' in card_data and card_data['used_in_fusion']:
                                 updated_fusions = []
                                 for fusion in card_data['used_in_fusion']:
                                     if fusion.get('result_card_id') == result_card_id:
-                                        # Update the package_id
-                                        fusion['package_id'] = new_pack_id
+                                        # Update the pack_reference instead of package_id
+                                        pack_collection_id = updates.pack_collection_id or current_recipe_data.get('pack_collection_id')
+                                        pack_reference = f"/packs/{pack_collection_id}/{pack_collection_id}/{new_pack_id}"
+
+                                        # Remove package_id if it exists and add pack_reference
+                                        if 'package_id' in fusion:
+                                            del fusion['package_id']
+
+                                        fusion['pack_reference'] = pack_reference
                                     updated_fusions.append(fusion)
 
                                 # Update the card with the updated array using update_card_information
