@@ -30,14 +30,14 @@ async def generate_signed_url(gcs_uri: str) -> str:
             logger.warning(f"Could not parse bucket/blob name from GCS URI: {gcs_uri}")
             return gcs_uri
         bucket_name, blob_name = parts[0], parts[1]
-        
+
         storage_client = get_storage_client() # Use centralized client getter
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
-        
-        # Set expiration time (e.g., 1 hour)
-        expiration = timedelta(seconds=3600) 
-        
+
+        # Set expiration time (7 days)
+        expiration = timedelta(days=7) 
+
         # Determine credentials based on environment
         credentials = None
         if os.getenv("K_SERVICE") or os.getenv("GOOGLE_COMPUTE_ENGINE_PROJECT"): # Check for Cloud Run or other GCE
@@ -68,7 +68,7 @@ async def generate_signed_url(gcs_uri: str) -> str:
             method="GET",
             credentials=credentials,
         )
-        
+
         return signed_url
 
     except Exception as e:

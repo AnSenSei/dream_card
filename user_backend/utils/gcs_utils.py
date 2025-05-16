@@ -18,11 +18,40 @@ async def generate_signed_url(gcs_uri: str) -> str:
     Generates a signed URL for a GCS object that is valid for a limited time.
     Handles both Cloud Run/Compute Engine and local development environments.
     Requires GOOGLE_APPLICATION_CREDENTIALS for local development.
+    Also handles already signed URLs by extracting the original GCS URI.
     """
     try:
-        if not gcs_uri or not gcs_uri.startswith('gs://'): 
+        # Handle empty URI
+        if not gcs_uri:
+            logger.warning("Empty URI provided for signing")
+            return gcs_uri
+
+        # Handle already signed URLs (extract original GCS URI)
+        if gcs_uri.startswith('https://storage.googleapis.com/'):
+            # Extract bucket and blob from the URL
+            # Format: https://storage.googleapis.com/BUCKET_NAME/BLOB_PATH?params...
+            try:
+                # Remove query parameters if present
+                base_url = gcs_uri.split('?')[0]
+                # Remove the https://storage.googleapis.com/ prefix
+                path = base_url.replace('https://storage.googleapis.com/', '')
+                # Split into bucket and blob
+                parts = path.split('/', 1)
+                if len(parts) < 2:
+                    logger.warning(f"Could not extract bucket/blob from signed URL: {gcs_uri}")
+                    return gcs_uri
+                bucket_name, blob_name = parts
+                # Construct a new GCS URI
+                gcs_uri = f"gs://{bucket_name}/{blob_name}"
+                logger.info(f"Extracted GCS URI from signed URL: {gcs_uri}")
+            except Exception as e:
+                logger.warning(f"Failed to extract GCS URI from signed URL: {e}")
+                return gcs_uri
+
+        # Handle regular GCS URIs
+        if not gcs_uri.startswith('gs://'):
             logger.warning(f"Invalid or non-GCS URI provided for signing: {gcs_uri}")
-            return gcs_uri # Return as is or perhaps None/empty string?
+            return gcs_uri
 
         # Parse bucket and object path from gs:// URI
         parts = gcs_uri[5:].split('/', 1)
@@ -35,8 +64,8 @@ async def generate_signed_url(gcs_uri: str) -> str:
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
 
-        # Set expiration time (e.g., 1 hour)
-        expiration = timedelta(seconds=3600) 
+        # Set expiration time (7 days)
+        expiration = timedelta(days=7) 
 
         # Determine credentials based on environment
         credentials = None

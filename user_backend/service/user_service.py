@@ -11,7 +11,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_transactional, Increment
 
 from config import get_logger, settings
-from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest
+from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs
 
 logger = get_logger(__name__)
@@ -1810,3 +1810,697 @@ async def withdraw_ship_card(user_id: str, card_id: str, subcollection_name: str
     except Exception as e:
         logger.error(f"Error withdrawing/shipping card {card_id} for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to withdraw/ship card: {str(e)}")
+
+async def get_user_card(
+    user_id: str,
+    collection_id: str,
+    card_id: str,
+    db_client: AsyncClient
+) -> UserCard:
+    """
+    Get a specific card from a user's collection.
+
+    Args:
+        user_id: The ID of the user who owns the card
+        collection_id: The collection ID of the card (e.g., 'pokemon')
+        card_id: The ID of the card to retrieve
+        db_client: Firestore client
+
+    Returns:
+        UserCard: The requested card
+
+    Raises:
+        HTTPException: If the user or card is not found
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the card reference
+        card_ref = user_ref.collection('cards').document('cards').collection(collection_id).document(card_id)
+        card_doc = await card_ref.get()
+
+        if not card_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found in collection {collection_id}")
+
+        # Get the card data
+        card_data = card_doc.to_dict()
+
+        # Generate signed URL for the card image
+        if 'image_url' in card_data and card_data['image_url']:
+            try:
+                card_data['image_url'] = await generate_signed_url(card_data['image_url'])
+            except Exception as sign_error:
+                logger.error(f"Failed to generate signed URL for {card_data['image_url']}: {sign_error}")
+                # Keep the original URL if signing fails
+
+        # Create and return a UserCard object from the card data
+        user_card = UserCard(**card_data)
+
+        return user_card
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting card {card_id} from collection {collection_id} for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get card: {str(e)}")
+
+async def withdraw_listing(
+    user_id: str,
+    listing_id: str,
+    db_client: AsyncClient
+) -> dict:
+    """
+    Withdraw a listing for a card that a user has put up for sale.
+
+    This function:
+    1. Verifies the listing exists
+    2. Verifies the user is the owner of the listing
+    3. Gets the card reference and quantity from the listing
+    4. Updates the user's card in a transaction to decrease locked_quantity and increase quantity
+    5. Deletes the listing
+    6. Returns a success message
+
+    Args:
+        user_id: The ID of the user withdrawing the listing
+        listing_id: The ID of the listing to withdraw
+        db_client: Firestore async client
+
+    Returns:
+        dict: A dictionary with a success message
+
+    Raises:
+        HTTPException: If there's an error withdrawing the listing
+    """
+    try:
+        # 1. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+
+        # 2. Verify user is the owner of the listing
+        owner_reference = listing_data.get("owner_reference", "")
+        expected_owner_path = f"{settings.firestore_collection_users}/{user_id}"
+
+        if owner_reference != expected_owner_path:
+            raise HTTPException(status_code=403, detail="You are not authorized to withdraw this listing")
+
+        # 3. Get card reference and quantity from the listing
+        card_reference = listing_data.get("card_reference", "")
+        listing_quantity = listing_data.get("quantity", 0)
+
+        if not card_reference or listing_quantity <= 0:
+            raise HTTPException(status_code=400, detail="Invalid listing data")
+
+        # Parse card_reference to get collection_id and card_id
+        try:
+            collection_id, card_id = card_reference.split('/')
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid card reference format: {card_reference}")
+
+
+        collection_id = listing_data.get("collection_id", collection_id)
+        logger.info(f"collection_id: {collection_id}")
+
+        # Get reference to the user's card
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        card_ref = user_ref.collection('cards').document('cards').collection(collection_id).document(card_id)
+
+        # Check if the card still exists
+        card_doc = await card_ref.get()
+        if not card_doc.exists:
+            # If the card doesn't exist anymore, just delete the listing
+            await listing_ref.delete()
+            return {"message": f"Listing {listing_id} withdrawn successfully, but card no longer exists"}
+
+        # Get the current card data
+        card_data = card_doc.to_dict()
+        current_locked_quantity = card_data.get("locked_quantity", 0)
+        current_quantity = card_data.get("quantity", 0)
+
+        # 4. Update the user's card in a transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # Decrease the locked_quantity
+            new_locked_quantity = max(0, current_locked_quantity - listing_quantity)
+
+            # Increase the quantity
+            new_quantity = current_quantity + listing_quantity
+
+            # Update both locked_quantity and quantity
+            tx.update(card_ref, {
+                "locked_quantity": new_locked_quantity,
+                "quantity": new_quantity
+            })
+
+            # Delete the listing
+            tx.delete(listing_ref)
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        logger.info(f"Successfully withdrew listing {listing_id} for user {user_id}")
+        return {"message": f"Listing {listing_id} withdrawn successfully"}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error withdrawing listing {listing_id} for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to withdraw listing: {str(e)}")
+
+async def create_card_listing(
+    user_id: str,
+    listing_request: CreateCardListingRequest,
+    db_client: AsyncClient
+) -> CardListing:
+    """
+    Create a listing for a card that a user wants to sell.
+
+    This function:
+    1. Verifies the user exists
+    2. Checks if the user has the card and enough quantity
+    3. Creates a new document in the "listings" collection
+    4. Reduces the quantity of the card in the user's collection
+    5. Returns the created listing
+
+    Args:
+        user_id: The ID of the user creating the listing
+        listing_request: The CreateCardListingRequest containing listing details
+        db_client: Firestore async client
+
+    Returns:
+        CardListing: The created listing
+
+    Raises:
+        HTTPException: If there's an error creating the listing
+    """
+    try:
+        # 1. Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # 2. Get collection_id and card_id from the request
+        collection_id = listing_request.collection_id
+        card_id = listing_request.card_id
+
+        # 3. Get the user's card to retrieve card_reference and card data
+        user_card = await get_user_card(
+            user_id=user_id,
+            collection_id=collection_id,
+            card_id=card_id,
+            db_client=db_client
+        )
+
+        # Get card_reference from the user's card
+        card_reference = user_card.card_reference
+
+        # 4. Check if user has enough available quantity (total quantity minus locked quantity)
+        available_quantity = user_card.quantity
+        if available_quantity < listing_request.quantity:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough cards available. Requested: {listing_request.quantity}, Available: {available_quantity}"
+            )
+
+        # Get reference to the card document for the transaction
+        card_ref = user_ref.collection('cards').document('cards').collection(collection_id).document(card_id)
+
+        # 4. Create listing document
+        now = datetime.now()
+        listing_data = {
+            "owner_reference": user_ref.path,  # Reference to the seller user document
+            "card_reference": card_reference,  # Card global ID
+            "collection_id": collection_id,  # Collection ID of the card
+            "quantity": listing_request.quantity,  # Quantity being listed
+            "createdAt": now,
+            "pricePoints": listing_request.pricePoints,
+            "priceCash": listing_request.priceCash,
+            "image_url": user_card.image_url  # Add image_url from the user's card
+        }
+
+        # Add expiration date if provided
+        if listing_request.expiresAt:
+            listing_data["expiresAt"] = listing_request.expiresAt
+
+        # 5. Create a new document in the listings collection
+        listings_ref = db_client.collection('listings')
+        new_listing_ref = listings_ref.document()  # Auto-generate ID
+
+        # 6. Update user's card locked_quantity and quantity in a transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # Increase the locked_quantity
+            new_locked_quantity = user_card.locked_quantity + listing_request.quantity
+
+            # Decrease the quantity
+            new_quantity = user_card.quantity - listing_request.quantity
+
+            # Update both locked_quantity and quantity
+            tx.update(card_ref, {
+                "locked_quantity": new_locked_quantity,
+                "quantity": new_quantity
+            })
+
+            # Create the listing
+            tx.set(new_listing_ref, listing_data)
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        # 7. Get the created listing
+        listing_doc = await new_listing_ref.get()
+        listing_data = listing_doc.to_dict()
+
+        # 8. Create and return a CardListing object
+        listing = CardListing(
+            owner_reference=listing_data["owner_reference"],
+            card_reference=listing_data["card_reference"],
+            collection_id=listing_data["collection_id"],
+            quantity=listing_data["quantity"],
+            createdAt=listing_data["createdAt"],
+            pricePoints=listing_data.get("pricePoints"),
+            priceCash=listing_data.get("priceCash"),
+            expiresAt=listing_data.get("expiresAt"),
+            highestOfferPoints=listing_data.get("highestOfferPoints"),
+            highestOfferCash=listing_data.get("highestOfferCash"),
+            image_url=listing_data.get("image_url")
+        )
+
+        logger.info(f"Successfully created listing {new_listing_ref.id} for card {card_reference} by user {user_id}")
+        return listing
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error creating listing for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create listing: {str(e)}")
+
+async def get_user_listings(
+    user_id: str,
+    db_client: AsyncClient
+) -> List[CardListing]:
+    """
+    Get all listings for a user.
+
+    This function:
+    1. Verifies the user exists
+    2. Queries the listings collection for documents where owner_reference matches the user's path
+    3. Converts the Firestore documents to CardListing objects
+    4. Returns a list of CardListing objects
+
+    Args:
+        user_id: The ID of the user to get listings for
+        db_client: Firestore async client
+
+    Returns:
+        List[CardListing]: A list of CardListing objects
+
+    Raises:
+        HTTPException: If there's an error getting the listings
+    """
+    try:
+        # 1. Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # 2. Query the listings collection for documents where owner_reference matches the user's path
+        listings_ref = db_client.collection('listings')
+        query = listings_ref.where("owner_reference", "==", user_ref.path)
+
+        # 3. Execute the query
+        listings_docs = await query.get()
+
+        # 4. Convert the Firestore documents to CardListing objects
+        listings = []
+        for doc in listings_docs:
+            listing_data = doc.to_dict()
+            listing_data['id'] = doc.id  # Add the document ID to the data
+
+            # Generate signed URL for the card image if it exists
+            if 'image_url' in listing_data and listing_data['image_url']:
+                try:
+                    listing_data['image_url'] = await generate_signed_url(listing_data['image_url'])
+                except Exception as sign_error:
+                    logger.error(f"Failed to generate signed URL for {listing_data['image_url']}: {sign_error}")
+                    # Keep the original URL if signing fails
+
+            # Create a CardListing object
+            listing = CardListing(
+                owner_reference=listing_data["owner_reference"],
+                card_reference=listing_data["card_reference"],
+                collection_id=listing_data.get("collection_id", ""),
+                quantity=listing_data["quantity"],
+                createdAt=listing_data["createdAt"],
+                pricePoints=listing_data.get("pricePoints"),
+                priceCash=listing_data.get("priceCash"),
+                expiresAt=listing_data.get("expiresAt"),
+                highestOfferPoints=listing_data.get("highestOfferPoints"),
+                highestOfferCash=listing_data.get("highestOfferCash"),
+                image_url=listing_data.get("image_url")
+            )
+            listings.append(listing)
+
+        logger.info(f"Successfully retrieved {len(listings)} listings for user {user_id}")
+        return listings
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting listings for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get listings: {str(e)}")
+
+async def get_listing_by_id(
+    listing_id: str,
+    db_client: AsyncClient
+) -> CardListing:
+    """
+    Get a listing by its ID.
+
+    This function:
+    1. Verifies the listing exists
+    2. Retrieves the listing document from Firestore
+    3. Converts the Firestore document to a CardListing object
+    4. Returns the CardListing object
+
+    Args:
+        listing_id: The ID of the listing to retrieve
+        db_client: Firestore async client
+
+    Returns:
+        CardListing: The listing object
+
+    Raises:
+        HTTPException: If there's an error getting the listing or if the listing doesn't exist
+    """
+    try:
+        # 1. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        # 2. Get the listing data
+        listing_data = listing_doc.to_dict()
+        listing_data['id'] = listing_doc.id  # Add the document ID to the data
+
+        # 3. Generate signed URL for the card image if it exists
+        if 'image_url' in listing_data and listing_data['image_url']:
+            try:
+                listing_data['image_url'] = await generate_signed_url(listing_data['image_url'])
+            except Exception as sign_error:
+                logger.error(f"Failed to generate signed URL for {listing_data['image_url']}: {sign_error}")
+                # Keep the original URL if signing fails
+
+        # 4. Create and return a CardListing object
+        listing = CardListing(
+            owner_reference=listing_data["owner_reference"],
+            card_reference=listing_data["card_reference"],
+            collection_id=listing_data.get("collection_id", ""),
+            quantity=listing_data["quantity"],
+            createdAt=listing_data["createdAt"],
+            pricePoints=listing_data.get("pricePoints"),
+            priceCash=listing_data.get("priceCash"),
+            expiresAt=listing_data.get("expiresAt"),
+            highestOfferPoints=listing_data.get("highestOfferPoints"),
+            highestOfferCash=listing_data.get("highestOfferCash"),
+            image_url=listing_data.get("image_url")
+        )
+
+        logger.info(f"Successfully retrieved listing {listing_id}")
+        return listing
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting listing {listing_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get listing: {str(e)}")
+
+async def withdraw_offer(
+    user_id: str,
+    listing_id: str,
+    offer_id: str,
+    db_client: AsyncClient
+) -> dict:
+    """
+    Withdraw an offer for a listing.
+
+    This function:
+    1. Verifies the user exists
+    2. Verifies the listing exists
+    3. Verifies the offer exists and belongs to the user
+    4. Deletes the offer from the listing's "offers" subcollection
+    5. Deletes the corresponding offer from the user's "my_offers" subcollection
+    6. If it was the highest offer, updates the listing's highestOfferPoints field
+    7. Returns a success message
+
+    Args:
+        user_id: The ID of the user withdrawing the offer
+        listing_id: The ID of the listing the offer was made for
+        offer_id: The ID of the offer to withdraw
+        db_client: Firestore async client
+
+    Returns:
+        dict: A dictionary with a success message
+
+    Raises:
+        HTTPException: If there's an error withdrawing the offer
+    """
+    try:
+        # 1. Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # 2. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+        # 3. Verify offer exists and belongs to the user
+        offer_ref = listing_ref.collection('offers').document(offer_id)
+        offer_doc = await offer_ref.get()
+        if not offer_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Offer with ID {offer_id} not found")
+
+        offer_data = offer_doc.to_dict()
+        expected_offerer_path = f"{settings.firestore_collection_users}/{user_id}"
+        if offer_data.get("offererRef", "") != expected_offerer_path:
+            raise HTTPException(status_code=403, detail="You are not authorized to withdraw this offer")
+
+        # 4. Find the corresponding offer in the user's my_offers subcollection
+        my_offers_ref = user_ref.collection('my_offers')
+        my_offers_query = my_offers_ref.where("listingId", "==", listing_id)
+        my_offers_docs = await my_offers_query.get()
+
+        my_offer_ref = None
+        for doc in my_offers_docs:
+            my_offer_data = doc.to_dict()
+            # Check if this is the same offer by comparing amount and timestamp
+            if (my_offer_data.get("amount") == offer_data.get("amount") and 
+                my_offer_data.get("at") == offer_data.get("at")):
+                my_offer_ref = doc.reference
+                break
+
+        if not my_offer_ref:
+            logger.warning(f"Could not find corresponding my_offer for offer {offer_id} in user {user_id}'s my_offers collection")
+
+        # 5. Check if this is the highest offer
+        current_highest_offer = listing_data.get("highestOfferPoints", None)
+        is_highest_offer = False
+
+        if current_highest_offer and offer_data.get("amount") == current_highest_offer.get("amount"):
+            is_highest_offer = True
+
+        # 6. Delete the offers and update the listing in a transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # Delete the offer from the listing's offers subcollection
+            tx.delete(offer_ref)
+
+            # Delete the corresponding offer from the user's my_offers subcollection if found
+            if my_offer_ref:
+                tx.delete(my_offer_ref)
+
+            # If this was the highest offer, find the next highest offer and update the listing
+            if is_highest_offer:
+                # Query for the next highest offer
+                offers_query = listing_ref.collection('offers').order_by("amount", direction=firestore.Query.DESCENDING).limit(1)
+                offers_snapshot = await offers_query.get()
+
+                if offers_snapshot and len(offers_snapshot) > 0:
+                    # There is a new highest offer
+                    new_highest_offer = offers_snapshot[0].to_dict()
+                    tx.update(listing_ref, {
+                        "highestOfferPoints": new_highest_offer
+                    })
+                else:
+                    # No more offers, remove the highestOfferPoints field
+                    tx.update(listing_ref, {
+                        "highestOfferPoints": firestore.DELETE_FIELD
+                    })
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        logger.info(f"Successfully withdrew offer {offer_id} for listing {listing_id} by user {user_id}")
+        return {"message": f"Offer for listing {listing_id} withdrawn successfully"}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error withdrawing offer {offer_id} for listing {listing_id} by user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to withdraw offer: {str(e)}")
+
+async def offer_points(
+    user_id: str,
+    listing_id: str,
+    offer_request: OfferPointsRequest,
+    db_client: AsyncClient
+) -> CardListing:
+    """
+    Offer points for a listing.
+
+    This function:
+    1. Verifies the listing exists
+    2. Verifies the user exists
+    3. Creates a new offer document in the "offers" subcollection under the listing
+    4. Creates a new offer document in the "my_offers" subcollection under the user
+    5. If it's the highest offer, updates the highestOfferPoints field in the listing document
+    6. Returns the updated listing
+
+    Args:
+        user_id: The ID of the user making the offer
+        listing_id: The ID of the listing to offer points for
+        offer_request: The OfferPointsRequest containing the points to offer
+        db_client: Firestore async client
+
+    Returns:
+        CardListing: The updated listing
+
+    Raises:
+        HTTPException: If there's an error offering points for the listing
+    """
+    try:
+        # 1. Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # 2. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+        # 3. Check if the user is the owner of the listing
+        owner_reference = listing_data.get("owner_reference", "")
+        expected_owner_path = f"{settings.firestore_collection_users}/{user_id}"
+
+        if owner_reference == expected_owner_path:
+            raise HTTPException(status_code=400, detail="You cannot offer points for your own listing")
+
+        # 4. Create a new offer document in the "offers" subcollection
+        now = datetime.now()
+
+        # Get the offers subcollection reference
+        offers_ref = listing_ref.collection('offers')
+        new_offer_ref = offers_ref.document()  # Auto-generate ID
+
+        offer_data = {
+            "offererRef": user_ref.path,  # Reference to the user making the offer
+            "amount": offer_request.points,  # Points offered
+            "at": now,  # Timestamp of the offer
+            "offerreference": new_offer_ref.id  # Reference to this offer
+        }
+
+        # Get the user's my_offers subcollection reference
+        my_offers_ref = user_ref.collection('my_offers')
+        new_my_offer_ref = my_offers_ref.document()  # Auto-generate ID
+
+        # Create my_offer_data with additional listing information
+        my_offer_data = {
+            **offer_data,  # Include all offer data
+            "listingId": listing_id,  # Reference to the listing
+            "card_reference": listing_data.get("card_reference", ""),  # Card reference from the listing
+            "collection_id": listing_data.get("collection_id", ""),  # Collection ID from the listing
+            "image_url": listing_data.get("image_url", "")  # Image URL from the listing
+        }
+
+        # 5. Check if this is the highest offer
+        current_highest_offer = listing_data.get("highestOfferPoints", None)
+        is_highest_offer = False
+
+        if current_highest_offer is None or offer_request.points > current_highest_offer.get("amount", 0):
+            is_highest_offer = True
+
+        # 6. Update the listing and create the offer in a transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # Create the offer in the listing's offers subcollection
+            tx.set(new_offer_ref, offer_data)
+
+            # Create the offer in the user's my_offers subcollection
+            tx.set(new_my_offer_ref, my_offer_data)
+
+            # If this is the highest offer, update the listing
+            if is_highest_offer:
+                tx.update(listing_ref, {
+                    "highestOfferPoints": offer_data
+                })
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        # 7. Get the updated listing
+        updated_listing_doc = await listing_ref.get()
+        updated_listing_data = updated_listing_doc.to_dict()
+
+        # 8. Create and return a CardListing object
+        listing = CardListing(
+            owner_reference=updated_listing_data["owner_reference"],
+            card_reference=updated_listing_data["card_reference"],
+            collection_id=updated_listing_data["collection_id"],
+            quantity=updated_listing_data["quantity"],
+            createdAt=updated_listing_data["createdAt"],
+            pricePoints=updated_listing_data.get("pricePoints"),
+            priceCash=updated_listing_data.get("priceCash"),
+            expiresAt=updated_listing_data.get("expiresAt"),
+            highestOfferPoints=updated_listing_data.get("highestOfferPoints"),
+            highestOfferCash=updated_listing_data.get("highestOfferCash"),
+            image_url=updated_listing_data.get("image_url")
+        )
+
+        logger.info(f"Successfully created offer for listing {listing_id} by user {user_id}")
+        return listing
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error offering points for listing {listing_id} by user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to offer points for listing: {str(e)}")

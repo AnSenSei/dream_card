@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from config import get_logger, instrument_app, settings
-from router import user_router
+from router import account_router, card_router, marketplace_router
 
 # Configure logging with structured logger
 logger = get_logger("main")
@@ -61,8 +61,14 @@ api_v1.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 logger.info(f"SessionMiddleware added to /api/{API_VERSION} with a generated SECRET_KEY.")
 
 # Include routers
-api_v1.include_router(user_router.router)
-logger.info("User router included in the sub-API.")
+api_v1.include_router(account_router.router)
+logger.info("Account router included in the sub-API.")
+
+api_v1.include_router(card_router.router)
+logger.info("Card router included in the sub-API.")
+
+api_v1.include_router(marketplace_router.router)
+logger.info("Marketplace router included in the sub-API.")
 
 # Mount the sub-API (api_v1) under the main app (app)
 app.mount(f"/{SERVICE_PATH}/api/{API_VERSION}", api_v1)

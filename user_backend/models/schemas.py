@@ -57,6 +57,7 @@ class UserCard(BaseModel):
     point_worth: int
     quantity: int
     rarity: int
+    locked_quantity: int = 0  # Quantity locked for listings
     expireAt: Optional[datetime] = None
     buybackexpiresAt: Optional[datetime] = None
     request_date: Optional[datetime] = None  # Timestamp for when card was requested for shipping
@@ -124,6 +125,36 @@ class RandomFusionRequest(BaseModel):
     card_id1: str = Field(..., description="The ID of the first card to fuse")
     card_id2: str = Field(..., description="The ID of the second card to fuse")
     collection_id: str = Field(..., description="The collection ID of both cards")
+
+class CardListing(BaseModel):
+    """Model for a card listing"""
+    owner_reference: str  # Reference to the seller user document
+    card_reference: str  # Card global ID
+    collection_id: str  # Collection ID of the card
+    quantity: int  # Quantity being listed
+    createdAt: datetime
+    expiresAt: Optional[datetime] = None
+    pricePoints: Optional[int] = None  # Fixed price in points
+    priceCash: Optional[float] = None  # Fixed price in cash (yuan)
+    highestOfferPoints: Optional[Dict[str, Any]] = None  # Highest offer in points
+    highestOfferCash: Optional[Dict[str, Any]] = None  # Highest offer in cash
+    image_url: Optional[str] = None  # URL of the card image
+
+    class Config:
+        from_attributes = True
+
+class CreateCardListingRequest(BaseModel):
+    """Request model for creating a card listing"""
+    collection_id: str = Field(..., description="The collection ID of the card")
+    card_id: str = Field(..., description="The ID of the card")
+    quantity: int = Field(..., gt=0, description="The quantity to list (must be greater than 0)")
+    pricePoints: Optional[int] = None
+    priceCash: Optional[float] = None
+    expiresAt: Optional[datetime] = None
+
+class OfferPointsRequest(BaseModel):
+    """Request model for offering points for a listing"""
+    points: int = Field(..., gt=0, description="The number of points to offer (must be greater than 0)")
 
 class UserListResponse(BaseModel):
     """Response model for listing users"""
