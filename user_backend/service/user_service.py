@@ -11,7 +11,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_transactional, Increment
 
 from config import get_logger, settings
-from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest
+from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs
 
 logger = get_logger(__name__)
@@ -2258,14 +2258,14 @@ async def withdraw_offer(
     db_client: AsyncClient
 ) -> dict:
     """
-    Withdraw an offer for a listing.
+    Withdraw a point offer for a listing.
 
     This function:
     1. Verifies the user exists
     2. Verifies the listing exists
     3. Verifies the offer exists and belongs to the user
-    4. Deletes the offer from the listing's "offers" subcollection
-    5. Deletes the corresponding offer from the user's "my_offers" subcollection
+    4. Deletes the offer from the listing's "point_offers" subcollection
+    5. Deletes the corresponding offer from the user's "my_point_offers" subcollection
     6. If it was the highest offer, updates the listing's highestOfferPoints field
     7. Returns a success message
 
@@ -2297,23 +2297,23 @@ async def withdraw_offer(
         listing_data = listing_doc.to_dict()
 
         # 3. Verify offer exists and belongs to the user
-        offer_ref = listing_ref.collection('offers').document(offer_id)
+        offer_ref = listing_ref.collection('point_offers').document(offer_id)
         offer_doc = await offer_ref.get()
         if not offer_doc.exists:
-            raise HTTPException(status_code=404, detail=f"Offer with ID {offer_id} not found")
+            raise HTTPException(status_code=404, detail=f"Point offer with ID {offer_id} not found")
 
         offer_data = offer_doc.to_dict()
         expected_offerer_path = f"{settings.firestore_collection_users}/{user_id}"
         if offer_data.get("offererRef", "") != expected_offerer_path:
             raise HTTPException(status_code=403, detail="You are not authorized to withdraw this offer")
 
-        # 4. Find the corresponding offer in the user's my_offers subcollection
-        my_offers_ref = user_ref.collection('my_offers')
-        my_offers_query = my_offers_ref.where("listingId", "==", listing_id)
-        my_offers_docs = await my_offers_query.get()
+        # 4. Find the corresponding offer in the user's my_point_offers subcollection
+        my_point_offers_ref = user_ref.collection('my_point_offers')
+        my_point_offers_query = my_point_offers_ref.where("listingId", "==", listing_id)
+        my_point_offers_docs = await my_point_offers_query.get()
 
         my_offer_ref = None
-        for doc in my_offers_docs:
+        for doc in my_point_offers_docs:
             my_offer_data = doc.to_dict()
             # Check if this is the same offer by comparing amount and timestamp
             if (my_offer_data.get("amount") == offer_data.get("amount") and 
@@ -2328,12 +2328,12 @@ async def withdraw_offer(
         current_highest_offer = listing_data.get("highestOfferPoints", None)
         is_highest_offer = False
 
-        if current_highest_offer and offer_data.get("amount") == current_highest_offer.get("amount"):
+        if current_highest_offer and offer_data.get("offerreference") == current_highest_offer.get("offerreference"):
             is_highest_offer = True
 
-        # 6. Delete the offers and update the listing in a transaction
+        # 6. Delete the offers in a transaction
         @firestore.async_transactional
-        async def _txn(tx: firestore.AsyncTransaction):
+        async def _delete_txn(tx: firestore.AsyncTransaction):
             # Delete the offer from the listing's offers subcollection
             tx.delete(offer_ref)
 
@@ -2341,36 +2341,179 @@ async def withdraw_offer(
             if my_offer_ref:
                 tx.delete(my_offer_ref)
 
-            # If this was the highest offer, find the next highest offer and update the listing
-            if is_highest_offer:
-                # Query for the next highest offer
-                offers_query = listing_ref.collection('offers').order_by("amount", direction=firestore.Query.DESCENDING).limit(1)
-                offers_snapshot = await offers_query.get()
+        # Execute the delete transaction
+        delete_transaction = db_client.transaction()
+        await _delete_txn(delete_transaction)
 
+        # 7. If this was the highest offer, find the next highest offer and update the listing
+        if is_highest_offer:
+            # Get all remaining offers and sort them by amount to find the highest
+            offers_query = listing_ref.collection('point_offers').order_by("amount", direction=firestore.Query.DESCENDING).limit(1)
+            offers_snapshot = await offers_query.get()
+
+            logger.info(f"Found {len(offers_snapshot)} point offers after withdrawal")
+
+            # Update the listing in a separate transaction
+            @firestore.async_transactional
+            async def _update_txn(tx: firestore.AsyncTransaction):
                 if offers_snapshot and len(offers_snapshot) > 0:
                     # There is a new highest offer
                     new_highest_offer = offers_snapshot[0].to_dict()
+                    logger.info(f"Setting new highest point offer: {new_highest_offer}")
                     tx.update(listing_ref, {
                         "highestOfferPoints": new_highest_offer
                     })
                 else:
-                    # No more offers, remove the highestOfferPoints field
+                    # No more offers, remove the highest offer field
+                    logger.info(f"No more point offers, removing highestOfferPoints field")
                     tx.update(listing_ref, {
                         "highestOfferPoints": firestore.DELETE_FIELD
                     })
 
-        # Execute the transaction
-        transaction = db_client.transaction()
-        await _txn(transaction)
+            # Execute the update transaction
+            update_transaction = db_client.transaction()
+            await _update_txn(update_transaction)
 
-        logger.info(f"Successfully withdrew offer {offer_id} for listing {listing_id} by user {user_id}")
-        return {"message": f"Offer for listing {listing_id} withdrawn successfully"}
+        logger.info(f"Successfully withdrew point offer {offer_id} for listing {listing_id} by user {user_id}")
+        return {"message": f"Point offer for listing {listing_id} withdrawn successfully"}
 
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error withdrawing offer {offer_id} for listing {listing_id} by user {user_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to withdraw offer: {str(e)}")
+        logger.error(f"Error withdrawing point offer {offer_id} for listing {listing_id} by user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to withdraw point offer: {str(e)}")
+
+async def withdraw_cash_offer(
+    user_id: str,
+    listing_id: str,
+    offer_id: str,
+    db_client: AsyncClient
+) -> dict:
+    """
+    Withdraw a cash offer for a listing.
+
+    This function:
+    1. Verifies the user exists
+    2. Verifies the listing exists
+    3. Verifies the offer exists and belongs to the user
+    4. Deletes the offer from the listing's "cash_offers" subcollection
+    5. Deletes the corresponding offer from the user's "my_cash_offers" subcollection
+    6. If it was the highest offer, updates the listing's highestOfferCash field
+    7. Returns a success message
+
+    Args:
+        user_id: The ID of the user withdrawing the offer
+        listing_id: The ID of the listing the offer was made for
+        offer_id: The ID of the offer to withdraw
+        db_client: Firestore async client
+
+    Returns:
+        dict: A dictionary with a success message
+
+    Raises:
+        HTTPException: If there's an error withdrawing the offer
+    """
+    try:
+        # 1. Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # 2. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+        # 3. Verify offer exists and belongs to the user
+        offer_ref = listing_ref.collection('cash_offers').document(offer_id)
+        offer_doc = await offer_ref.get()
+        if not offer_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Cash offer with ID {offer_id} not found")
+
+        offer_data = offer_doc.to_dict()
+        expected_offerer_path = f"{settings.firestore_collection_users}/{user_id}"
+        if offer_data.get("offererRef", "") != expected_offerer_path:
+            raise HTTPException(status_code=403, detail="You are not authorized to withdraw this offer")
+
+        # 4. Find the corresponding offer in the user's my_cash_offers subcollection
+        my_cash_offers_ref = user_ref.collection('my_cash_offers')
+        my_cash_offers_query = my_cash_offers_ref.where("listingId", "==", listing_id)
+        my_cash_offers_docs = await my_cash_offers_query.get()
+
+        my_offer_ref = None
+        for doc in my_cash_offers_docs:
+            my_offer_data = doc.to_dict()
+            # Check if this is the same offer by comparing amount and timestamp
+            if (my_offer_data.get("amount") == offer_data.get("amount") and 
+                my_offer_data.get("at") == offer_data.get("at")):
+                my_offer_ref = doc.reference
+                break
+
+        if not my_offer_ref:
+            logger.warning(f"Could not find corresponding my_offer for offer {offer_id} in user {user_id}'s my_offers collection")
+
+        # 5. Check if this is the highest offer
+        current_highest_offer = listing_data.get("highestOfferCash", None)
+        is_highest_offer = False
+
+        if current_highest_offer and offer_data.get("offerreference") == current_highest_offer.get("offerreference"):
+            is_highest_offer = True
+
+        # 6. Delete the offers in a transaction
+        @firestore.async_transactional
+        async def _delete_txn(tx: firestore.AsyncTransaction):
+            # Delete the offer from the listing's offers subcollection
+            tx.delete(offer_ref)
+
+            # Delete the corresponding offer from the user's my_offers subcollection if found
+            if my_offer_ref:
+                tx.delete(my_offer_ref)
+
+        # Execute the delete transaction
+        delete_transaction = db_client.transaction()
+        await _delete_txn(delete_transaction)
+
+        # 7. If this was the highest offer, find the next highest offer and update the listing
+        if is_highest_offer:
+            # Get all remaining offers and sort them by amount to find the highest
+            offers_query = listing_ref.collection('cash_offers').order_by("amount", direction=firestore.Query.DESCENDING).limit(1)
+            offers_snapshot = await offers_query.get()
+
+            logger.info(f"Found {len(offers_snapshot)} cash offers after withdrawal")
+
+            # Update the listing in a separate transaction
+            @firestore.async_transactional
+            async def _update_txn(tx: firestore.AsyncTransaction):
+                if offers_snapshot and len(offers_snapshot) > 0:
+                    # There is a new highest offer
+                    new_highest_offer = offers_snapshot[0].to_dict()
+                    logger.info(f"Setting new highest cash offer: {new_highest_offer}")
+                    tx.update(listing_ref, {
+                        "highestOfferCash": new_highest_offer
+                    })
+                else:
+                    # No more offers, remove the highest offer field
+                    logger.info(f"No more cash offers, removing highestOfferCash field")
+                    tx.update(listing_ref, {
+                        "highestOfferCash": firestore.DELETE_FIELD
+                    })
+
+            # Execute the update transaction
+            update_transaction = db_client.transaction()
+            await _update_txn(update_transaction)
+
+        logger.info(f"Successfully withdrew cash offer {offer_id} for listing {listing_id} by user {user_id}")
+        return {"message": f"Cash offer for listing {listing_id} withdrawn successfully"}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error withdrawing cash offer {offer_id} for listing {listing_id} by user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to withdraw cash offer: {str(e)}")
 
 async def offer_points(
     user_id: str,
@@ -2384,9 +2527,9 @@ async def offer_points(
     This function:
     1. Verifies the listing exists
     2. Verifies the user exists
-    3. Creates a new offer document in the "offers" subcollection under the listing
-    4. Creates a new offer document in the "my_offers" subcollection under the user
-    5. If it's the highest offer, updates the highestOfferPoints field in the listing document
+    3. Creates a new offer document in the "point_offers" subcollection under the listing
+    4. Creates a new offer document in the "my_point_offers" subcollection under the user
+    5. If it's the highest offer, updates the highestOfferPoint field in the listing document
     6. Returns the updated listing
 
     Args:
@@ -2424,23 +2567,24 @@ async def offer_points(
         if owner_reference == expected_owner_path:
             raise HTTPException(status_code=400, detail="You cannot offer points for your own listing")
 
-        # 4. Create a new offer document in the "offers" subcollection
+        # 4. Create a new offer document in the "point_offers" subcollection
         now = datetime.now()
 
-        # Get the offers subcollection reference
-        offers_ref = listing_ref.collection('offers')
-        new_offer_ref = offers_ref.document()  # Auto-generate ID
+        # Get the point_offers subcollection reference
+        point_offers_ref = listing_ref.collection('point_offers')
+        new_offer_ref = point_offers_ref.document()  # Auto-generate ID
 
         offer_data = {
             "offererRef": user_ref.path,  # Reference to the user making the offer
             "amount": offer_request.points,  # Points offered
             "at": now,  # Timestamp of the offer
-            "offerreference": new_offer_ref.id  # Reference to this offer
+            "offerreference": new_offer_ref.id,  # Reference to this offer
+            "type": "point"  # Indicate this is a point offer
         }
 
-        # Get the user's my_offers subcollection reference
-        my_offers_ref = user_ref.collection('my_offers')
-        new_my_offer_ref = my_offers_ref.document()  # Auto-generate ID
+        # Get the user's my_point_offers subcollection reference
+        my_point_offers_ref = user_ref.collection('my_point_offers')
+        new_my_offer_ref = my_point_offers_ref.document()  # Auto-generate ID
 
         # Create my_offer_data with additional listing information
         my_offer_data = {
@@ -2504,3 +2648,466 @@ async def offer_points(
     except Exception as e:
         logger.error(f"Error offering points for listing {listing_id} by user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to offer points for listing: {str(e)}")
+
+async def update_point_offer(
+    user_id: str,
+    listing_id: str,
+    offer_id: str,
+    update_request: UpdatePointOfferRequest,
+    db_client: AsyncClient
+) -> CardListing:
+    """
+    Update a point offer for a listing with a higher amount.
+
+    This function:
+    1. Verifies the user exists
+    2. Verifies the listing exists
+    3. Verifies the offer exists and belongs to the user
+    4. Verifies the new amount is higher than the current amount
+    5. Updates the offer document in the "point_offers" subcollection under the listing
+    6. Updates the corresponding offer in the user's "my_point_offers" subcollection
+    7. If it becomes the highest offer, updates the highestOfferPoints field in the listing document
+    8. Returns the updated listing
+
+    Args:
+        user_id: The ID of the user updating the offer
+        listing_id: The ID of the listing the offer was made for
+        offer_id: The ID of the offer to update
+        update_request: The UpdatePointOfferRequest containing the new points to offer
+        db_client: Firestore async client
+
+    Returns:
+        CardListing: The updated listing
+
+    Raises:
+        HTTPException: If there's an error updating the point offer
+    """
+    try:
+        # 1. Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # 2. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+        # 3. Verify offer exists and belongs to the user
+        offer_ref = listing_ref.collection('point_offers').document(offer_id)
+        offer_doc = await offer_ref.get()
+        if not offer_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Point offer with ID {offer_id} not found")
+
+        offer_data = offer_doc.to_dict()
+        expected_offerer_path = f"{settings.firestore_collection_users}/{user_id}"
+        if offer_data.get("offererRef", "") != expected_offerer_path:
+            raise HTTPException(status_code=403, detail="You are not authorized to update this offer")
+
+        # 4. Verify the new amount is higher than the current amount
+        current_amount = offer_data.get("amount", 0)
+        if update_request.points <= current_amount:
+            raise HTTPException(status_code=400, detail="New offer amount must be higher than the current amount")
+
+        # 5. Find the corresponding offer in the user's my_point_offers subcollection
+        my_point_offers_ref = user_ref.collection('my_point_offers')
+        my_point_offers_query = my_point_offers_ref.where("listingId", "==", listing_id)
+        my_point_offers_docs = await my_point_offers_query.get()
+
+        my_offer_ref = None
+        for doc in my_point_offers_docs:
+            my_offer_data = doc.to_dict()
+            # Check if this is the same offer by comparing offerreference
+            if my_offer_data.get("offerreference") == offer_id:
+                my_offer_ref = doc.reference
+                break
+
+        if not my_offer_ref:
+            logger.warning(f"Could not find corresponding my_offer for offer {offer_id} in user {user_id}'s my_point_offers collection")
+            raise HTTPException(status_code=404, detail=f"Could not find corresponding my_offer for offer {offer_id}")
+
+        # 6. Update the offer data with the new amount
+        now = datetime.now()
+        updated_offer_data = {
+            **offer_data,
+            "amount": update_request.points,
+            "at": now  # Update the timestamp
+        }
+
+        # Create updated my_offer_data with the new amount
+        updated_my_offer_data = {
+            **offer_data,
+            "amount": update_request.points,
+            "at": now,
+            "listingId": listing_id,
+            "card_reference": listing_data.get("card_reference", ""),
+            "collection_id": listing_data.get("collection_id", ""),
+            "image_url": listing_data.get("image_url", "")
+        }
+
+        # 7. Check if this will be the highest offer
+        current_highest_offer = listing_data.get("highestOfferPoints", None)
+        is_highest_offer = False
+
+        if current_highest_offer is None or update_request.points > current_highest_offer.get("amount", 0):
+            is_highest_offer = True
+        elif current_highest_offer.get("offerreference") == offer_id and update_request.points > current_amount:
+            # This is already the highest offer and we're increasing the amount
+            is_highest_offer = True
+
+        # 8. Update the offers and possibly the listing in a transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # Update the offer in the listing's point_offers subcollection
+            tx.update(offer_ref, {
+                "amount": update_request.points,
+                "at": now
+            })
+
+            # Update the offer in the user's my_point_offers subcollection
+            tx.update(my_offer_ref, {
+                "amount": update_request.points,
+                "at": now
+            })
+
+            # If this will be the highest offer, update the listing
+            if is_highest_offer:
+                tx.update(listing_ref, {
+                    "highestOfferPoints": updated_offer_data
+                })
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        # 9. Get the updated listing
+        updated_listing_doc = await listing_ref.get()
+        updated_listing_data = updated_listing_doc.to_dict()
+
+        # 10. Create and return a CardListing object
+        listing = CardListing(
+            owner_reference=updated_listing_data["owner_reference"],
+            card_reference=updated_listing_data["card_reference"],
+            collection_id=updated_listing_data["collection_id"],
+            quantity=updated_listing_data["quantity"],
+            createdAt=updated_listing_data["createdAt"],
+            pricePoints=updated_listing_data.get("pricePoints"),
+            priceCash=updated_listing_data.get("priceCash"),
+            expiresAt=updated_listing_data.get("expiresAt"),
+            highestOfferPoints=updated_listing_data.get("highestOfferPoints"),
+            highestOfferCash=updated_listing_data.get("highestOfferCash"),
+            image_url=updated_listing_data.get("image_url")
+        )
+
+        logger.info(f"Successfully updated point offer {offer_id} for listing {listing_id} by user {user_id}")
+        return listing
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating point offer {offer_id} for listing {listing_id} by user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update point offer: {str(e)}")
+
+async def update_cash_offer(
+    user_id: str,
+    listing_id: str,
+    offer_id: str,
+    update_request: UpdateCashOfferRequest,
+    db_client: AsyncClient
+) -> CardListing:
+    """
+    Update a cash offer for a listing with a higher amount.
+
+    This function:
+    1. Verifies the user exists
+    2. Verifies the listing exists
+    3. Verifies the offer exists and belongs to the user
+    4. Verifies the new amount is higher than the current amount
+    5. Updates the offer document in the "cash_offers" subcollection under the listing
+    6. Updates the corresponding offer in the user's "my_cash_offers" subcollection
+    7. If it becomes the highest offer, updates the highestOfferCash field in the listing document
+    8. Returns the updated listing
+
+    Args:
+        user_id: The ID of the user updating the offer
+        listing_id: The ID of the listing the offer was made for
+        offer_id: The ID of the offer to update
+        update_request: The UpdateCashOfferRequest containing the new cash amount to offer
+        db_client: Firestore async client
+
+    Returns:
+        CardListing: The updated listing
+
+    Raises:
+        HTTPException: If there's an error updating the cash offer
+    """
+    try:
+        # 1. Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # 2. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+        # 3. Verify offer exists and belongs to the user
+        offer_ref = listing_ref.collection('cash_offers').document(offer_id)
+        offer_doc = await offer_ref.get()
+        if not offer_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Cash offer with ID {offer_id} not found")
+
+        offer_data = offer_doc.to_dict()
+        expected_offerer_path = f"{settings.firestore_collection_users}/{user_id}"
+        if offer_data.get("offererRef", "") != expected_offerer_path:
+            raise HTTPException(status_code=403, detail="You are not authorized to update this offer")
+
+        # 4. Verify the new amount is higher than the current amount
+        current_amount = offer_data.get("amount", 0)
+        if update_request.cash <= current_amount:
+            raise HTTPException(status_code=400, detail="New offer amount must be higher than the current amount")
+
+        # 5. Find the corresponding offer in the user's my_cash_offers subcollection
+        my_cash_offers_ref = user_ref.collection('my_cash_offers')
+        my_cash_offers_query = my_cash_offers_ref.where("listingId", "==", listing_id)
+        my_cash_offers_docs = await my_cash_offers_query.get()
+
+        my_offer_ref = None
+        for doc in my_cash_offers_docs:
+            my_offer_data = doc.to_dict()
+            # Check if this is the same offer by comparing offerreference
+            if my_offer_data.get("offerreference") == offer_id:
+                my_offer_ref = doc.reference
+                break
+
+        if not my_offer_ref:
+            logger.warning(f"Could not find corresponding my_offer for offer {offer_id} in user {user_id}'s my_cash_offers collection")
+            raise HTTPException(status_code=404, detail=f"Could not find corresponding my_offer for offer {offer_id}")
+
+        # 6. Update the offer data with the new amount
+        now = datetime.now()
+        updated_offer_data = {
+            **offer_data,
+            "amount": update_request.cash,
+            "at": now  # Update the timestamp
+        }
+
+        # Create updated my_offer_data with the new amount
+        updated_my_offer_data = {
+            **offer_data,
+            "amount": update_request.cash,
+            "at": now,
+            "listingId": listing_id,
+            "card_reference": listing_data.get("card_reference", ""),
+            "collection_id": listing_data.get("collection_id", ""),
+            "image_url": listing_data.get("image_url", "")
+        }
+
+        # 7. Check if this will be the highest offer
+        current_highest_offer = listing_data.get("highestOfferCash", None)
+        is_highest_offer = False
+
+        if current_highest_offer is None or update_request.cash > current_highest_offer.get("amount", 0):
+            is_highest_offer = True
+        elif current_highest_offer.get("offerreference") == offer_id and update_request.cash > current_amount:
+            # This is already the highest offer and we're increasing the amount
+            is_highest_offer = True
+
+        # 8. Update the offers and possibly the listing in a transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # Update the offer in the listing's cash_offers subcollection
+            tx.update(offer_ref, {
+                "amount": update_request.cash,
+                "at": now
+            })
+
+            # Update the offer in the user's my_cash_offers subcollection
+            tx.update(my_offer_ref, {
+                "amount": update_request.cash,
+                "at": now
+            })
+
+            # If this will be the highest offer, update the listing
+            if is_highest_offer:
+                tx.update(listing_ref, {
+                    "highestOfferCash": updated_offer_data
+                })
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        # 9. Get the updated listing
+        updated_listing_doc = await listing_ref.get()
+        updated_listing_data = updated_listing_doc.to_dict()
+
+        # 10. Create and return a CardListing object
+        listing = CardListing(
+            owner_reference=updated_listing_data["owner_reference"],
+            card_reference=updated_listing_data["card_reference"],
+            collection_id=updated_listing_data["collection_id"],
+            quantity=updated_listing_data["quantity"],
+            createdAt=updated_listing_data["createdAt"],
+            pricePoints=updated_listing_data.get("pricePoints"),
+            priceCash=updated_listing_data.get("priceCash"),
+            expiresAt=updated_listing_data.get("expiresAt"),
+            highestOfferPoints=updated_listing_data.get("highestOfferPoints"),
+            highestOfferCash=updated_listing_data.get("highestOfferCash"),
+            image_url=updated_listing_data.get("image_url")
+        )
+
+        logger.info(f"Successfully updated cash offer {offer_id} for listing {listing_id} by user {user_id}")
+        return listing
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating cash offer {offer_id} for listing {listing_id} by user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update cash offer: {str(e)}")
+
+async def offer_cash(
+    user_id: str,
+    listing_id: str,
+    offer_request: OfferCashRequest,
+    db_client: AsyncClient
+) -> CardListing:
+    """
+    Offer cash for a listing.
+
+    This function:
+    1. Verifies the listing exists
+    2. Verifies the user exists
+    3. Creates a new offer document in the "cash_offers" subcollection under the listing
+    4. Creates a new offer document in the "my_cash_offers" subcollection under the user
+    5. If it's the highest offer, updates the highestOfferCash field in the listing document
+    6. Returns the updated listing
+
+    Args:
+        user_id: The ID of the user making the offer
+        listing_id: The ID of the listing to offer cash for
+        offer_request: The OfferCashRequest containing the cash amount to offer
+        db_client: Firestore async client
+
+    Returns:
+        CardListing: The updated listing
+
+    Raises:
+        HTTPException: If there's an error offering cash for the listing
+    """
+    try:
+        # 1. Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # 2. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+        # 3. Check if the user is the owner of the listing
+        owner_reference = listing_data.get("owner_reference", "")
+        expected_owner_path = f"{settings.firestore_collection_users}/{user_id}"
+
+        if owner_reference == expected_owner_path:
+            raise HTTPException(status_code=400, detail="You cannot offer cash for your own listing")
+
+        # 4. Create a new offer document in the "cash_offers" subcollection
+        now = datetime.now()
+
+        # Get the cash_offers subcollection reference
+        cash_offers_ref = listing_ref.collection('cash_offers')
+        new_offer_ref = cash_offers_ref.document()  # Auto-generate ID
+
+        offer_data = {
+            "offererRef": user_ref.path,  # Reference to the user making the offer
+            "amount": offer_request.cash,  # Cash offered
+            "at": now,  # Timestamp of the offer
+            "offerreference": new_offer_ref.id,  # Reference to this offer
+            "type": "cash"  # Indicate this is a cash offer
+        }
+
+        # Get the user's my_cash_offers subcollection reference
+        my_cash_offers_ref = user_ref.collection('my_cash_offers')
+        new_my_offer_ref = my_cash_offers_ref.document()  # Auto-generate ID
+
+        # Create my_offer_data with additional listing information
+        my_offer_data = {
+            **offer_data,  # Include all offer data
+            "listingId": listing_id,  # Reference to the listing
+            "card_reference": listing_data.get("card_reference", ""),  # Card reference from the listing
+            "collection_id": listing_data.get("collection_id", ""),  # Collection ID from the listing
+            "image_url": listing_data.get("image_url", "")  # Image URL from the listing
+        }
+
+        # 5. Check if this is the highest offer
+        highest_offer_field = "highestOfferCash"
+        current_highest_offer = listing_data.get(highest_offer_field, None)
+        is_highest_offer = False
+
+        if current_highest_offer is None or offer_request.cash > current_highest_offer.get("amount", 0):
+            is_highest_offer = True
+
+        # 6. Update the listing and create the offer in a transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # Create the offer in the listing's cash_offers subcollection
+            tx.set(new_offer_ref, offer_data)
+
+            # Create the offer in the user's my_offers subcollection
+            tx.set(new_my_offer_ref, my_offer_data)
+
+            # If this is the highest offer, update the listing
+            if is_highest_offer:
+                tx.update(listing_ref, {
+                    "highestOfferCash": offer_data
+                })
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        # 7. Get the updated listing
+        updated_listing_doc = await listing_ref.get()
+        updated_listing_data = updated_listing_doc.to_dict()
+
+        # 8. Create and return a CardListing object
+        listing = CardListing(
+            owner_reference=updated_listing_data["owner_reference"],
+            card_reference=updated_listing_data["card_reference"],
+            collection_id=updated_listing_data["collection_id"],
+            quantity=updated_listing_data["quantity"],
+            createdAt=updated_listing_data["createdAt"],
+            pricePoints=updated_listing_data.get("pricePoints"),
+            priceCash=updated_listing_data.get("priceCash"),
+            expiresAt=updated_listing_data.get("expiresAt"),
+            highestOfferPoints=updated_listing_data.get("highestOfferPoints"),
+            highestOfferCash=updated_listing_data.get("highestOfferCash"),
+            image_url=updated_listing_data.get("image_url")
+        )
+
+        logger.info(f"Successfully created cash offer for listing {listing_id} by user {user_id}")
+        return listing
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error offering cash for listing {listing_id} by user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to offer cash for listing: {str(e)}")

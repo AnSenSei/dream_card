@@ -156,6 +156,18 @@ class OfferPointsRequest(BaseModel):
     """Request model for offering points for a listing"""
     points: int = Field(..., gt=0, description="The number of points to offer (must be greater than 0)")
 
+class OfferCashRequest(BaseModel):
+    """Request model for offering cash for a listing"""
+    cash: float = Field(..., gt=0, description="The amount of cash to offer (must be greater than 0)")
+
+class UpdatePointOfferRequest(BaseModel):
+    """Request model for updating a point offer for a listing"""
+    points: int = Field(..., gt=0, description="The new number of points to offer (must be greater than the current offer)")
+
+class UpdateCashOfferRequest(BaseModel):
+    """Request model for updating a cash offer for a listing"""
+    cash: float = Field(..., gt=0, description="The new amount of cash to offer (must be greater than the current offer)")
+
 class UserListResponse(BaseModel):
     """Response model for listing users"""
     items: List[User]

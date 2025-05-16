@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Body
 from google.cloud import firestore
 from typing import List
 
-from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest
-from service.user_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id
+from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest
+from service.user_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer
 from config import get_firestore_client, get_logger
 
 logger = get_logger(__name__)
@@ -162,20 +162,20 @@ async def get_listing_route(
         logger.error(f"Error getting listing {listing_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while retrieving the listing")
 
-@router.delete("/{user_id}/listings/{listing_id}/offers/{offer_id}", response_model=dict)
-async def withdraw_offer_route(
-    user_id: str = Path(..., description="The ID of the user withdrawing the offer"),
+@router.delete("/{user_id}/listings/{listing_id}/offers/points/{offer_id}", response_model=dict)
+async def withdraw_point_offer_route(
+    user_id: str = Path(..., description="The ID of the user withdrawing the point offer"),
     listing_id: str = Path(..., description="The ID of the listing the offer was made for"),
     offer_id: str = Path(..., description="The ID of the offer to withdraw"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
-    Withdraw an offer for a listing.
+    Withdraw a point offer for a listing.
 
     This endpoint:
     1. Takes a user ID, listing ID, and offer ID as arguments
     2. Verifies the offer exists and belongs to the user
-    3. Deletes the offer from the listing's "offers" subcollection
+    3. Deletes the offer from the listing's "point_offers" subcollection
     4. Deletes the corresponding offer from the user's "my_offers" subcollection
     5. If it was the highest offer, updates the listing's highestOfferPoints field
     6. Returns a success message
@@ -191,5 +191,141 @@ async def withdraw_offer_route(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error withdrawing offer for listing: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An error occurred while withdrawing the offer")
+        logger.error(f"Error withdrawing point offer for listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while withdrawing the point offer")
+
+@router.post("/{user_id}/listings/{listing_id}/offers/cash", response_model=CardListing)
+async def offer_cash_route(
+    user_id: str = Path(..., description="The ID of the user making the offer"),
+    listing_id: str = Path(..., description="The ID of the listing to offer cash for"),
+    offer_request: OfferCashRequest = Body(..., description="The cash amount to offer"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Offer cash for a listing.
+
+    This endpoint:
+    1. Takes a user ID, listing ID, and cash amount to offer as arguments
+    2. Verifies the user exists
+    3. Verifies the listing exists
+    4. Creates a new offer document in the "cash_offers" subcollection under the listing
+    5. If it's the highest offer, updates the highestOfferCash field in the listing document
+    6. Returns the updated listing
+    """
+    try:
+        listing = await offer_cash(
+            user_id=user_id,
+            listing_id=listing_id,
+            offer_request=offer_request,
+            db_client=db
+        )
+        return listing
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error offering cash for listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while offering cash for the listing")
+
+@router.delete("/{user_id}/listings/{listing_id}/offers/cash/{offer_id}", response_model=dict)
+async def withdraw_cash_offer_route(
+    user_id: str = Path(..., description="The ID of the user withdrawing the cash offer"),
+    listing_id: str = Path(..., description="The ID of the listing the offer was made for"),
+    offer_id: str = Path(..., description="The ID of the offer to withdraw"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Withdraw a cash offer for a listing.
+
+    This endpoint:
+    1. Takes a user ID, listing ID, and offer ID as arguments
+    2. Verifies the offer exists and belongs to the user
+    3. Deletes the offer from the listing's "cash_offers" subcollection
+    4. Deletes the corresponding offer from the user's "my_offers" subcollection
+    5. If it was the highest offer, updates the listing's highestOfferCash field
+    6. Returns a success message
+    """
+    try:
+        result = await withdraw_cash_offer(
+            user_id=user_id,
+            listing_id=listing_id,
+            offer_id=offer_id,
+            db_client=db
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error withdrawing cash offer for listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while withdrawing the cash offer")
+
+@router.put("/{user_id}/listings/{listing_id}/offers/points/{offer_id}", response_model=CardListing)
+async def update_point_offer_route(
+    user_id: str = Path(..., description="The ID of the user updating the offer"),
+    listing_id: str = Path(..., description="The ID of the listing the offer was made for"),
+    offer_id: str = Path(..., description="The ID of the offer to update"),
+    update_request: UpdatePointOfferRequest = Body(..., description="The new points to offer"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Update a point offer for a listing with a higher amount.
+
+    This endpoint:
+    1. Takes a user ID, listing ID, offer ID, and new points to offer as arguments
+    2. Verifies the user exists
+    3. Verifies the listing exists
+    4. Verifies the offer exists and belongs to the user
+    5. Verifies the new amount is higher than the current amount
+    6. Updates the offer with the new amount
+    7. If it becomes the highest offer, updates the listing's highestOfferPoints field
+    8. Returns the updated listing
+    """
+    try:
+        listing = await update_point_offer(
+            user_id=user_id,
+            listing_id=listing_id,
+            offer_id=offer_id,
+            update_request=update_request,
+            db_client=db
+        )
+        return listing
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating point offer for listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while updating the point offer")
+
+@router.put("/{user_id}/listings/{listing_id}/offers/cash/{offer_id}", response_model=CardListing)
+async def update_cash_offer_route(
+    user_id: str = Path(..., description="The ID of the user updating the offer"),
+    listing_id: str = Path(..., description="The ID of the listing the offer was made for"),
+    offer_id: str = Path(..., description="The ID of the offer to update"),
+    update_request: UpdateCashOfferRequest = Body(..., description="The new cash amount to offer"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Update a cash offer for a listing with a higher amount.
+
+    This endpoint:
+    1. Takes a user ID, listing ID, offer ID, and new cash amount to offer as arguments
+    2. Verifies the user exists
+    3. Verifies the listing exists
+    4. Verifies the offer exists and belongs to the user
+    5. Verifies the new amount is higher than the current amount
+    6. Updates the offer with the new amount
+    7. If it becomes the highest offer, updates the listing's highestOfferCash field
+    8. Returns the updated listing
+    """
+    try:
+        listing = await update_cash_offer(
+            user_id=user_id,
+            listing_id=listing_id,
+            offer_id=offer_id,
+            update_request=update_request,
+            db_client=db
+        )
+        return listing
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating cash offer for listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while updating the cash offer")
