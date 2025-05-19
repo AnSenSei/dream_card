@@ -77,6 +77,7 @@ async def get_pack_details_route(
 async def add_pack_route(
     pack_name: str = Form(...),
     collection_id: str = Form(...),
+    price: int = Form(...),
     win_rate: Optional[int] = Form(None),
     popularity: Optional[int] = Form(None),
     db: firestore.AsyncClient = Depends(get_firestore_client),
@@ -89,6 +90,7 @@ async def add_pack_route(
 
     - **pack_name**: Name of the new pack (sent as form field).
     - **collection_id**: ID of the pack collection (sent as form field).
+    - **price**: Price of the pack (sent as form field).
     - **win_rate**: Optional win rate for the pack (sent as form field).
     - **popularity**: Optional popularity value for the pack (sent as form field). Defaults to 0 if not provided.
     - **image_file**: Optional image file for the pack.
@@ -97,6 +99,7 @@ async def add_pack_route(
         pack_request_model = AddPackRequest(
             pack_name=pack_name,
             collection_id=collection_id,
+            price=price,
             win_rate=win_rate,
             is_active=False,
             popularity=popularity
@@ -107,6 +110,7 @@ async def add_pack_route(
             "pack_id": pack_id, 
             "pack_name": pack_name,
             "collection_id": collection_id,
+            "price": str(price),
             "popularity": str(popularity if popularity is not None else 0),
             "message": f"Pack '{pack_name}' created successfully in collection '{collection_id}'"
         }

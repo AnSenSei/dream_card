@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body
 from typing import Optional, List
 from google.cloud import firestore
 
-from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest
+from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse
 from service.user_service import (
     add_card_to_user,
     add_multiple_cards_to_user,
@@ -11,9 +11,11 @@ from service.user_service import (
     get_user_cards,
     destroy_card,
     withdraw_ship_card,
+    withdraw_ship_multiple_cards,
     perform_fusion,
     perform_random_fusion,
-    get_user_card
+    get_user_card,
+    check_card_missing
 )
 from config import get_firestore_client, get_logger
 
@@ -113,38 +115,39 @@ async def get_user_cards_route(
         logger.error(f"Error getting cards for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while retrieving the cards")
 
-@router.post("/{user_id}/draw-card", response_model=DrawnCard)
-async def draw_card_route(
-    user_id: str = Path(...),
-    pack_id: str = Query(..., description="The ID of the pack to draw from"),
-    db: firestore.AsyncClient = Depends(get_firestore_client)
-):
-    """
-    Draw a card from a pack for a user.
-
-    This endpoint:
-    1. Takes a user ID and pack ID as arguments
-    2. Draws a random card from the pack based on the pack's probabilities
-    3. Adds the card to the user's collection
-    4. Returns the drawn card
-    """
-    try:
-        drawn_card = await draw_card_from_pack(
-            user_id=user_id,
-            pack_id=pack_id,
-            db_client=db
-        )
-        return drawn_card
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error drawing card for user: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An error occurred while drawing the card")
+# @router.post("/{user_id}/draw-card", response_model=DrawnCard)
+# async def draw_card_route(
+#     user_id: str = Path(...),
+#     pack_id: str = Query(..., description="The ID of the pack to draw from"),
+#     db: firestore.AsyncClient = Depends(get_firestore_client)
+# ):
+#     """
+#     Draw a card from a pack for a user.
+#
+#     This endpoint:
+#     1. Takes a user ID and pack ID as arguments
+#     2. Draws a random card from the pack based on the pack's probabilities
+#     3. Adds the card to the user's collection
+#     4. Returns the drawn card
+#     """
+#     try:
+#         drawn_card = await draw_card_from_pack(
+#             user_id=user_id,
+#             pack_id=pack_id,
+#             db_client=db
+#         )
+#         return drawn_card
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Error drawing card for user: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail="An error occurred while drawing the card")
 
 @router.post("/{user_id}/draw-multiple-cards", response_model=List[DrawnCard])
 async def draw_multiple_cards_route(
     user_id: str = Path(...),
     pack_id: str = Query(..., description="The ID of the pack to draw from"),
+    collection_id: str = Query(..., description="The ID of the collection containing the pack"),
     count: int = Query(..., description="The number of cards to draw"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
@@ -152,17 +155,18 @@ async def draw_multiple_cards_route(
     Draw multiple cards from a pack for a user.
 
     This endpoint:
-    1. Takes a user ID, pack ID, and count as arguments
+    1. Takes a user ID, pack ID, collection ID, and count as arguments
     2. Draws the specified number of random cards from the pack based on the pack's probabilities
     3. Adds the cards to the user's collection
     4. Returns the drawn cards
     """
     try:
         drawn_cards = await draw_multiple_cards_from_pack(
-            user_id=user_id,
+            collection_id=collection_id,
             pack_id=pack_id,
-            count=count,
-            db_client=db
+            user_id=user_id,
+            db_client=db,
+            count=count
         )
         return drawn_cards
     except HTTPException:
@@ -200,38 +204,75 @@ async def destroy_card_route(
         logger.error(f"Error destroying card for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while destroying the card")
 
+@router.post("/{user_id}/cards/withdraw", response_model=WithdrawCardsResponse)
+async def withdraw_multiple_cards_route(
+    user_id: str = Path(..., description="The ID of the user who owns the cards"),
+    withdraw_request: WithdrawCardsRequest = Body(..., description="The cards to withdraw"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Create a withdraw request for multiple cards from a user's collection.
+
+    This endpoint:
+    1. Takes a user ID and a list of cards to withdraw (each with card_id and quantity)
+    2. Creates a new withdraw request with fields for request date and status
+    3. Creates a "cards" subcollection under the withdraw request to store all withdrawn cards
+    4. For each card, if quantity is less than the card's quantity, only withdraws the specified quantity
+    5. Only removes a card from the original subcollection if the remaining quantity is 0
+    6. Returns a list of the updated cards from the withdraw request
+    """
+    try:
+        # Convert the CardToWithdraw objects to dictionaries
+        cards_to_withdraw = [{"card_id": card.card_id, "quantity": card.quantity} for card in withdraw_request.cards]
+
+        withdrawn_cards = await withdraw_ship_multiple_cards(
+            user_id=user_id,
+            cards_to_withdraw=cards_to_withdraw,
+            subcollection_name=withdraw_request.subcollection_name,
+            db_client=db
+        )
+        return WithdrawCardsResponse(cards=withdrawn_cards)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating withdraw request for multiple cards for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while creating the withdraw request")
+
 @router.post("/{user_id}/cards/{card_id}/withdraw-ship", response_model=UserCard)
 async def withdraw_ship_card_route(
     user_id: str = Path(...),
     card_id: str = Path(...),
     subcollection_name: str = Query(..., description="The name of the subcollection where the card is stored"),
-    quantity: int = Query(1, description="The quantity to withdraw/ship (default: 1)"),
+    quantity: int = Query(1, description="The quantity to withdraw (default: 1)"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
-    Withdraw or ship a card from a user's collection.
+    Create a withdraw request for a card from a user's collection.
 
     This endpoint:
     1. Takes a user ID, card ID, subcollection name, and quantity as arguments
-    2. Moves the card from the specified subcollection to the "shipped" subcollection
-    3. If quantity is less than the card's quantity, only moves the specified quantity
-    4. Only removes the card from the original subcollection if the remaining quantity is 0
-    5. Returns the updated shipped card
+    2. Creates a new withdraw request with fields for request date and status
+    3. Creates a "cards" subcollection under the withdraw request to store the withdrawn card
+    4. If quantity is less than the card's quantity, only withdraws the specified quantity
+    5. Only removes the card from the original subcollection if the remaining quantity is 0
+    6. Returns the updated card from the withdraw request
+
+    Note: For withdrawing multiple cards at once, use the /users/{user_id}/cards/withdraw endpoint.
     """
     try:
-        shipped_card = await withdraw_ship_card(
+        withdrawn_card = await withdraw_ship_card(
             user_id=user_id,
             card_id=card_id,
             subcollection_name=subcollection_name,
             db_client=db,
             quantity=quantity
         )
-        return shipped_card
+        return withdrawn_card
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error withdrawing/shipping card for user: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An error occurred while withdrawing/shipping the card")
+        logger.error(f"Error creating withdraw request for card for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while creating the withdraw request")
 
 @router.get("/{user_id}/cards/{collection_id}/{card_id}", response_model=UserCard)
 async def get_user_card_route(
@@ -350,3 +391,39 @@ async def perform_random_fusion_route(
     except Exception as e:
         logger.error(f"Error performing random fusion for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while performing the random fusion")
+
+@router.post("/{user_id}/check-missing-cards", response_model=CheckCardMissingResponse)
+async def check_missing_cards_route(
+    user_id: str = Path(..., description="The ID of the user to check cards for"),
+    request: CheckCardMissingRequest = Body(..., description="The fusion recipe IDs to check"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Check which cards are missing for a user to perform fusion with specified recipes.
+
+    This endpoint:
+    1. Takes a user ID and a list of fusion recipe IDs
+    2. For each recipe, checks which ingredients the user is missing
+    3. Returns detailed information about missing cards for each recipe
+    4. Includes card names, images, and quantities where available
+
+    Args:
+        user_id: The ID of the user to check cards for
+        request: The CheckCardMissingRequest containing fusion recipe IDs to check
+        db: Firestore client
+
+    Returns:
+        CheckCardMissingResponse with details about missing cards for each recipe
+    """
+    try:
+        result = await check_card_missing(
+            user_id=user_id,
+            fusion_recipe_ids=request.fusion_recipe_ids,
+            db_client=db
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking missing cards for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while checking missing cards")

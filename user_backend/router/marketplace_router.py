@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Body
 from google.cloud import firestore
 from typing import List
 
-from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest
-from service.user_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer
+from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest
+from service.user_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer
 from config import get_firestore_client, get_logger
 
 logger = get_logger(__name__)
@@ -76,6 +76,7 @@ async def offer_points_route(
     user_id: str = Path(..., description="The ID of the user making the offer"),
     listing_id: str = Path(..., description="The ID of the listing to offer points for"),
     offer_request: OfferPointsRequest = Body(..., description="The points to offer"),
+    expired: int = 7,
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
@@ -88,13 +89,21 @@ async def offer_points_route(
     4. Creates a new offer document in the "offers" subcollection under the listing
     5. If it's the highest offer, updates the highestOfferPoints field in the listing document
     6. Returns the updated listing
+
+    Args:
+        user_id: The ID of the user making the offer
+        listing_id: The ID of the listing to offer points for
+        offer_request: The points to offer
+        expired: Number of days until the offer expires (default: 7)
+        db: Firestore async client
     """
     try:
         listing = await offer_points(
             user_id=user_id,
             listing_id=listing_id,
             offer_request=offer_request,
-            db_client=db
+            db_client=db,
+            expired=expired
         )
         return listing
     except HTTPException:
@@ -199,6 +208,7 @@ async def offer_cash_route(
     user_id: str = Path(..., description="The ID of the user making the offer"),
     listing_id: str = Path(..., description="The ID of the listing to offer cash for"),
     offer_request: OfferCashRequest = Body(..., description="The cash amount to offer"),
+    expired: int = 7,
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
@@ -211,13 +221,21 @@ async def offer_cash_route(
     4. Creates a new offer document in the "cash_offers" subcollection under the listing
     5. If it's the highest offer, updates the highestOfferCash field in the listing document
     6. Returns the updated listing
+
+    Args:
+        user_id: The ID of the user making the offer
+        listing_id: The ID of the listing to offer cash for
+        offer_request: The cash amount to offer
+        expired: Number of days until the offer expires (default: 7)
+        db: Firestore async client
     """
     try:
         listing = await offer_cash(
             user_id=user_id,
             listing_id=listing_id,
             offer_request=offer_request,
-            db_client=db
+            db_client=db,
+            expired=expired
         )
         return listing
     except HTTPException:
@@ -329,3 +347,35 @@ async def update_cash_offer_route(
     except Exception as e:
         logger.error(f"Error updating cash offer for listing: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while updating the cash offer")
+
+@router.post("/{user_id}/listings/{listing_id}/accept", response_model=CardListing)
+async def accept_offer_route(
+    user_id: str = Path(..., description="The ID of the user accepting the offer (must be the listing owner)"),
+    listing_id: str = Path(..., description="The ID of the listing"),
+    accept_request: AcceptOfferRequest = Body(..., description="The type of offer to accept"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Accept the highest offer (cash or point) for a listing.
+
+    This endpoint:
+    1. Takes a user ID, listing ID, and offer type as arguments
+    2. Verifies the listing exists and belongs to the user
+    3. Finds the highest offer of the specified type
+    4. Updates the status of the offer to "accepted"
+    5. Sets the payment_due date to 2 days after the accept time
+    6. Returns the updated listing
+    """
+    try:
+        listing = await accept_offer(
+            user_id=user_id,
+            listing_id=listing_id,
+            offer_type=accept_request.offer_type,
+            db_client=db
+        )
+        return listing
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error accepting offer for listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while accepting the offer")

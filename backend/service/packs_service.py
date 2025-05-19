@@ -56,6 +56,7 @@ async def create_pack_in_firestore(
 
     pack_name = pack_data.pack_name
     collection_id = pack_data.collection_id
+    price = pack_data.price
     win_rate = pack_data.win_rate
     is_active = pack_data.is_active
     popularity = pack_data.popularity
@@ -126,6 +127,7 @@ async def create_pack_in_firestore(
             "name": pack_name,
             "id": pack_id,
             "created_at": firestore.SERVER_TIMESTAMP,
+            "price": price,
             "win_rate": win_rate,
             "is_active": is_active,
             "popularity": popularity,

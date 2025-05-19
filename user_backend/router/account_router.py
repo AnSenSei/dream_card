@@ -41,13 +41,10 @@ async def create_account_route(
     - displayName: "AnSenSei"
     - addresses: [] (empty array)
     - avatar: null
-    - currentMonthKey: Current month in format "YYYY-MM"
-    - lastMonthKey: Last month in format "YYYY-MM"
+    - totalFusion: 0
 
     The following fields are automatically set:
     - createdAt: Current timestamp
-    - currentMonthCash: 0
-    - lastMonthCash: 0
     - level: 1
     - pointsBalance: 0
     - totalCashRecharged: 0

@@ -1,4 +1,4 @@
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 from uuid import UUID
 import random
 import math
@@ -11,7 +11,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_transactional, Increment
 
 from config import get_logger, settings
-from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest
+from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CheckCardMissingResponse, MissingCard, FusionRecipeMissingCards
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs
 
 logger = get_logger(__name__)
@@ -312,7 +312,7 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
             else:
                 logger.info(f"  Card Reference: ")
             logger.info(f"  Image URL: {card_data.get('image_url', '')}")
-            logger.info(f"  Point Worth: {card_data.get('point', 0)}")
+            logger.info(f"  Point Worth: {card_data.get('point_worth', 0)}")
             logger.info(f"  Quantity: {card_data.get('quantity', 0)}")
             logger.info(f"  Rarity: {card_data.get('rarity', 1)}")
 
@@ -370,7 +370,7 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
 
         # Create a list of drawn cards with detailed information
         drawn_cards = []
-        for card_data in cards_to_add:
+        for index, card_data in enumerate(cards_to_add, 1):
             # Get the card information from the cards subcollection
             card_ref = pack_ref.collection('cards').document(card_data['card_id'])
             card_snap = await card_ref.get()
@@ -379,9 +379,13 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
             # Convert any Firestore references to strings
             card_dict = convert_references_to_strings(card_dict)
 
-            # Generate signed URL for the card image if it's a GCS URI
+            # Ensure card_reference is a string
+            if 'card_reference' in card_data and not isinstance(card_data['card_reference'], str):
+                card_data['card_reference'] = convert_references_to_strings(card_data['card_reference'])
+
+            # Generate signed URL for the card image
             image_url = card_dict.get('image_url', '')
-            if image_url and image_url.startswith('gs://'):
+            if image_url:
                 try:
                     card_dict['image_url'] = await generate_signed_url(image_url)
                 except Exception as e:
@@ -396,7 +400,8 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
                 'card_name': card_dict.get('card_name', ''),
                 'point_worth': card_dict.get('point_worth', 0),
                 'quantity': card_dict.get('quantity', 0),
-                'rarity': card_dict.get('rarity', 0)
+                'rarity': card_dict.get('rarity', 0),
+                'num_draw': index  # Add the position of the card in the drawing sequence
             }
 
             drawn_cards.append(simplified_card)
@@ -410,6 +415,47 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
         except Exception as e:
             logger.error(f"Failed to increment popularity for pack '{pack_id}' in collection '{collection_id}': {e}")
             # Continue even if updating popularity fails
+
+        # Increment the total_drawn and totalPointsSpent fields in the user's document by the pack price multiplied by the number of cards drawn
+        try:
+            pack_price = pack_data.get('price', 0)
+            total_price = pack_price * len(drawn_cards)
+            await user_ref.update({
+                "total_drawn": Increment(total_price),
+                "totalPointsSpent": Increment(total_price)
+            })
+            logger.info(f"Incremented total_drawn and totalPointsSpent for user '{user_id}' by pack price ({pack_price}) * number of cards drawn ({len(drawn_cards)}) = {total_price}")
+
+            # Update weekly_spent collection
+            try:
+                # Get the current week's start date (Monday)
+                today = datetime.now()
+                start_of_week = today - timedelta(days=today.weekday())
+                week_id = start_of_week.strftime("%Y-%m-%d")
+
+                # Reference to the weekly_spent collection and this week's document
+                weekly_spent_ref = db_client.collection('weekly_spent').document('weekly_spent').collection(week_id).document(user_id)
+                weekly_doc = await weekly_spent_ref.get()
+
+                if weekly_doc.exists:
+                    # Update existing document
+                    await weekly_spent_ref.update({
+                        "spent": Increment(total_price),
+                        "updatedAt": SERVER_TIMESTAMP
+                    })
+                else:
+                    # Create new document
+                    await weekly_spent_ref.set({
+                        "spent": total_price,
+                        "updatedAt": SERVER_TIMESTAMP
+                    })
+                logger.info(f"Updated weekly_spent for user '{user_id}' with {total_price} points")
+            except Exception as e:
+                logger.error(f"Failed to update weekly_spent for user '{user_id}': {e}")
+                # Continue even if updating weekly_spent fails
+        except Exception as e:
+            logger.error(f"Failed to increment total_drawn and totalPointsSpent for user '{user_id}': {e}")
+            # Continue even if updating total_drawn and totalPointsSpent fails
 
         return drawn_cards
     except HTTPException as e:
@@ -918,7 +964,9 @@ async def destroy_card(
         else:
             tx.update(deep_ref, {"quantity": remaining})
             if main_snap.exists:
-                tx.update(main_ref, {"quantity": remaining})
+                main_card = main_snap.to_dict()
+                main_remaining = main_card["quantity"] - quantity
+                tx.update(main_ref, {"quantity": main_remaining})
             logger.info(f"Updated card {card_id} to quantity {remaining} for user {user_id}")
 
     txn = db_client.transaction()
@@ -1084,7 +1132,9 @@ async def add_points_to_user(user_id: str, points: int, db_client: AsyncClient) 
             raise HTTPException(status_code=400, detail="Points must be greater than 0")
 
         # Update the user's pointsBalance
-        await user_ref.update({"pointsBalance": firestore.Increment(points)})
+        await user_ref.update({
+            "pointsBalance": firestore.Increment(points)
+        })
 
         # Get the updated user data
         updated_user_doc = await user_ref.get()
@@ -1127,18 +1177,7 @@ async def create_account(request: CreateAccountRequest, db_client: AsyncClient, 
         # Get current timestamp
         now = datetime.now()
 
-        # Generate current month key and last month key if not provided
-        current_month_key = request.currentMonthKey or f"{now.year}-{now.month:02d}"
-        last_month_key = request.lastMonthKey
-        if not last_month_key:
-            # Calculate last month
-            if now.month == 1:
-                last_month = 12
-                last_year = now.year - 1
-            else:
-                last_month = now.month - 1
-                last_year = now.year
-            last_month_key = f"{last_year}-{last_month:02d}"
+        # No need to generate month keys anymore
 
         # Handle avatar upload if provided
         avatar_url = request.avatar
@@ -1157,18 +1196,15 @@ async def create_account(request: CreateAccountRequest, db_client: AsyncClient, 
         # Create user data
         user_data = {
             "createdAt": now,
-            "currentMonthCash": 0,
-            "currentMonthKey": current_month_key,
             "displayName": request.displayName,
             "email": request.email,
             "addresses": addresses,
             "avatar": avatar_url,
-            "lastMonthCash": 0,
-            "lastMonthKey": last_month_key,
             "level": 1,
             "pointsBalance": 0,
             "totalCashRecharged": 0,
-            "totalPointsSpent": 0
+            "totalPointsSpent": 0,
+            "totalFusion": request.totalFusion
         }
 
         # Create user document in Firestore
@@ -1321,6 +1357,9 @@ async def perform_fusion(
         # Use the collection name from the card_reference as the subcollection name
         result_card_ref = user_ref.collection('cards').document('cards').collection(card_collection_id).document(card_id)
         result_card_doc = await result_card_ref.get()
+
+        # Increment the user's totalFusion counter
+        await user_ref.update({"totalFusion": firestore.Increment(1)})
 
         if not result_card_doc.exists:
             # This shouldn't happen, but just in case
@@ -1568,6 +1607,9 @@ async def perform_random_fusion(
         result_card_ref = user_ref.collection('cards').document('cards').collection(collection_name).document(result_card_id)
         result_card_doc = await result_card_ref.get()
 
+        # Increment the user's totalFusion counter
+        await user_ref.update({"totalFusion": firestore.Increment(1)})
+
         if not result_card_doc.exists:
             # This shouldn't happen, but just in case
             return PerformFusionResponse(
@@ -1657,24 +1699,212 @@ async def delete_user_address(user_id: str, address_id: str, db_client: AsyncCli
         logger.error(f"Error deleting address for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete address: {str(e)}")
 
+async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dict[str, Any]], subcollection_name: str, db_client: AsyncClient) -> List[UserCard]:
+    """
+    Withdraw or ship multiple cards from a user's collection by creating a single withdraw request.
+    The withdraw request contains fields for request date and status, and a subcollection "cards" 
+    that contains all withdrawn cards.
+    For each card, if quantity is less than the card's quantity, only move the specified quantity.
+    Only remove a card from the original subcollection if the remaining quantity is 0.
+
+    Args:
+        user_id: The ID of the user who owns the cards
+        cards_to_withdraw: List of dictionaries containing card_id and quantity for each card to withdraw
+        subcollection_name: The name of the subcollection where the cards are currently stored
+        db_client: Firestore client
+
+    Returns:
+        List of the updated withdrawn cards as UserCard objects
+
+    Raises:
+        HTTPException: If there's an error withdrawing the cards
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Validate cards to withdraw
+        if not cards_to_withdraw:
+            raise HTTPException(status_code=400, detail="No cards specified for withdrawal")
+
+        # Create a new withdraw request
+        withdraw_requests_ref = user_ref.collection('withdraw_requests')
+        new_request_ref = withdraw_requests_ref.document()  # Auto-generate ID
+        request_cards_ref = new_request_ref.collection('cards')
+
+        # Prepare data for transaction
+        cards_data = []
+        for card_info in cards_to_withdraw:
+            card_id = card_info.get('card_id')
+            quantity = card_info.get('quantity', 1)
+
+            if not card_id:
+                raise HTTPException(status_code=400, detail="Card ID is required for each card")
+
+            if quantity <= 0:
+                raise HTTPException(status_code=400, detail=f"Quantity must be greater than 0 for card {card_id}")
+
+            # Get the card from the source subcollection
+            source_card_ref = user_ref.collection('cards').document('cards').collection(subcollection_name).document(card_id)
+            source_card_doc = await source_card_ref.get()
+
+            if not source_card_doc.exists:
+                raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found in subcollection {subcollection_name}")
+
+            source_card_data = source_card_doc.to_dict()
+            card = UserCard(**source_card_data)
+            card_quantity = card.quantity
+
+            if quantity > card_quantity:
+                raise HTTPException(status_code=400, detail=f"Cannot withdraw/ship {quantity} of card {card_id}, only {card_quantity} available")
+
+            # Get the main card reference and pre-fetch it
+            main_card_ref = user_ref.collection('cards').document(card_id)
+            main_card_doc = await main_card_ref.get()
+
+            # Add card data to the list
+            cards_data.append({
+                'card_id': card_id,
+                'quantity': quantity,
+                'source_card_ref': source_card_ref,
+                'source_card_data': source_card_data,
+                'remaining_quantity': card_quantity - quantity,
+                'main_card_ref': main_card_ref,
+                'main_card_doc': main_card_doc,
+                'request_card_ref': request_cards_ref.document(card_id)
+            })
+
+        # Create transaction to process all cards
+        @firestore.async_transactional
+        async def create_withdraw_request(transaction):
+            # Create the withdraw request document
+            now = datetime.now()
+            request_data = {
+                'request_date': now,
+                'status': 'pending',  # Initial status is pending
+                'user_id': user_id,
+                'created_at': now,
+                'card_count': len(cards_data)  # Add count of cards in this request
+            }
+            transaction.set(new_request_ref, request_data)
+
+            # Process each card
+            for card_data in cards_data:
+                card_id = card_data['card_id']
+                quantity_to_withdraw = card_data['quantity']
+                source_card_ref = card_data['source_card_ref']
+                source_card_data = card_data['source_card_data']
+                remaining_quantity = card_data['remaining_quantity']
+                main_card_ref = card_data['main_card_ref']
+                main_card_doc = card_data['main_card_doc']
+                request_card_ref = card_data['request_card_ref']
+
+                # Prepare the card data for the request cards subcollection
+                request_card_data = source_card_data.copy()
+                request_card_data['quantity'] = quantity_to_withdraw
+
+                # Add the card to the request cards subcollection
+                transaction.set(request_card_ref, request_card_data)
+
+                if remaining_quantity <= 0:
+                    # Delete the card from the source subcollection if quantity is 0
+                    transaction.delete(source_card_ref)
+
+                    # Also delete from the main cards collection if it exists
+                    if main_card_doc.exists:
+                        transaction.delete(main_card_ref)
+
+                    logger.info(f"Created withdraw request for all {quantity_to_ship} of card {card_id} from user {user_id}'s subcollection {subcollection_name}")
+                else:
+                    # Update the quantity in the source subcollection
+                    transaction.update(source_card_ref, {"quantity": remaining_quantity})
+
+                    # Also update in the main cards collection if it exists
+                    if main_card_doc.exists:
+                        transaction.update(main_card_ref, {"quantity": remaining_quantity})
+
+                    logger.info(f"Created withdraw request for {quantity_to_ship} of card {card_id} from user {user_id}'s subcollection {subcollection_name}, {remaining_quantity} remaining")
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await create_withdraw_request(transaction)
+
+        # Get the updated cards from the withdraw request
+        withdrawn_cards = []
+        for card_data in cards_data:
+            card_id = card_data['card_id']
+            request_card_ref = card_data['request_card_ref']
+
+            updated_request_card_doc = await request_card_ref.get()
+            updated_request_card_data = updated_request_card_doc.to_dict()
+
+            # Ensure ID is part of the data
+            if 'id' not in updated_request_card_data:
+                updated_request_card_data['id'] = card_id
+
+            # Generate signed URL for the card image
+            if 'image_url' in updated_request_card_data and updated_request_card_data['image_url']:
+                try:
+                    updated_request_card_data['image_url'] = await generate_signed_url(updated_request_card_data['image_url'])
+                except Exception as sign_error:
+                    logger.error(f"Failed to generate signed URL for {updated_request_card_data['image_url']}: {sign_error}")
+                    # Keep the original URL if signing fails
+
+            # Create a UserCard object from the updated request card data
+            withdrawn_card = UserCard(
+                card_reference=updated_request_card_data.get("card_reference", ""),
+                card_name=updated_request_card_data.get("card_name", ""),
+                date_got=updated_request_card_data.get("date_got"),
+                id=updated_request_card_data.get("id", card_id),
+                image_url=updated_request_card_data.get("image_url", ""),
+                point_worth=updated_request_card_data.get("point_worth", 0),
+                quantity=updated_request_card_data.get("quantity", 0),
+                rarity=updated_request_card_data.get("rarity", 1)
+            )
+
+            # Add optional fields if they exist in the data
+            if "expireAt" in updated_request_card_data:
+                withdrawn_card.expireAt = updated_request_card_data["expireAt"]
+            if "buybackexpiresAt" in updated_request_card_data:
+                withdrawn_card.buybackexpiresAt = updated_request_card_data["buybackexpiresAt"]
+            if "request_date" in updated_request_card_data:
+                withdrawn_card.request_date = updated_request_card_data["request_date"]
+
+            withdrawn_cards.append(withdrawn_card)
+
+        logger.info(f"Successfully created withdraw request for {len(withdrawn_cards)} cards from user {user_id}'s subcollection {subcollection_name}")
+        return withdrawn_cards
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error creating withdraw request for multiple cards for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create withdraw request: {str(e)}")
+
 async def withdraw_ship_card(user_id: str, card_id: str, subcollection_name: str, db_client: AsyncClient, quantity: int = 1) -> UserCard:
     """
-    Withdraw or ship a card from a user's collection by moving it to the "shipped" subcollection.
+    Withdraw a card from a user's collection by creating a withdraw request.
+    The withdraw request contains fields for request date and status, and a subcollection "cards" 
+    that contains all withdrawn cards.
     If quantity is less than the card's quantity, only move the specified quantity.
     Only remove the card from the original subcollection if the remaining quantity is 0.
 
     Args:
         user_id: The ID of the user who owns the card
-        card_id: The ID of the card to withdraw/ship
+        card_id: The ID of the card to withdraw
         subcollection_name: The name of the subcollection where the card is currently stored
         db_client: Firestore client
-        quantity: The quantity to withdraw/ship (default: 1)
+        quantity: The quantity to withdraw (default: 1)
 
     Returns:
-        The updated shipped card as a UserCard object
+        The updated withdrawn card as a UserCard object
 
     Raises:
-        HTTPException: If there's an error withdrawing/shipping the card
+        HTTPException: If there's an error withdrawing the card
     """
     try:
         # Check if user exists
@@ -1707,36 +1937,36 @@ async def withdraw_ship_card(user_id: str, card_id: str, subcollection_name: str
         # Calculate remaining quantity
         remaining_quantity = card_quantity - quantity
 
-        # Get the "shipped" subcollection reference
-        shipped_subcoll_ref = user_ref.collection('cards').document('cards').collection('shipped')
-        shipped_card_ref = shipped_subcoll_ref.document(card_id)
+        # Create a new withdraw request
+        withdraw_requests_ref = user_ref.collection('withdraw_requests')
+        new_request_ref = withdraw_requests_ref.document()  # Auto-generate ID
 
-        # Pre-fetch document snapshots outside the transaction
-        shipped_card_doc = await shipped_card_ref.get()
+        # Get the cards subcollection reference for this withdraw request
+        request_cards_ref = new_request_ref.collection('cards')
+        request_card_ref = request_cards_ref.document(card_id)
 
         # Get the main card reference and pre-fetch it
         main_card_ref = user_ref.collection('cards').document(card_id)
         main_card_doc = await main_card_ref.get()
 
         @firestore.async_transactional
-        async def move_card_to_shipped(transaction, source_card_ref, shipped_card_ref, remaining_quantity, quantity_to_ship):
-            # Prepare the card data for the shipped subcollection
-            shipped_card_data = source_card_data.copy()
+        async def create_withdraw_request(transaction, source_card_ref, request_card_ref, remaining_quantity, quantity_to_withdraw):
+            # Create the withdraw request document
+            now = datetime.now()
+            request_data = {
+                'request_date': now,
+                'status': 'pending',  # Initial status is pending
+                'user_id': user_id,
+                'created_at': now
+            }
+            transaction.set(new_request_ref, request_data)
 
-            # Add request date timestamp
-            shipped_card_data['request_date'] = datetime.now()
+            # Prepare the card data for the request cards subcollection
+            request_card_data = source_card_data.copy()
+            request_card_data['quantity'] = quantity_to_withdraw
 
-            # Now perform all writes
-            if shipped_card_doc.exists:
-                # If the card already exists in shipped, update its quantity
-                existing_shipped_data = shipped_card_doc.to_dict()
-                existing_quantity = existing_shipped_data.get('quantity', 0)
-                shipped_card_data['quantity'] = existing_quantity + quantity_to_ship
-                transaction.update(shipped_card_ref, shipped_card_data)
-            else:
-                # If the card doesn't exist in shipped, set its quantity to the shipped amount
-                shipped_card_data['quantity'] = quantity_to_ship
-                transaction.set(shipped_card_ref, shipped_card_data)
+            # Add the card to the request cards subcollection
+            transaction.set(request_card_ref, request_card_data)
 
             if remaining_quantity <= 0:
                 # Delete the card from the source subcollection if quantity is 0
@@ -1746,7 +1976,7 @@ async def withdraw_ship_card(user_id: str, card_id: str, subcollection_name: str
                 if main_card_doc.exists:
                     transaction.delete(main_card_ref)
 
-                logger.info(f"Moved all {quantity_to_ship} of card {card_id} from user {user_id}'s subcollection {subcollection_name} to 'shipped'")
+                logger.info(f"Created withdraw request for all {quantity_to_withdraw} of card {card_id} from user {user_id}'s subcollection {subcollection_name}")
             else:
                 # Update the quantity in the source subcollection
                 transaction.update(source_card_ref, {"quantity": remaining_quantity})
@@ -1755,61 +1985,61 @@ async def withdraw_ship_card(user_id: str, card_id: str, subcollection_name: str
                 if main_card_doc.exists:
                     transaction.update(main_card_ref, {"quantity": remaining_quantity})
 
-                logger.info(f"Moved {quantity_to_ship} of card {card_id} from user {user_id}'s subcollection {subcollection_name} to 'shipped', {remaining_quantity} remaining")
+                logger.info(f"Created withdraw request for {quantity_to_withdraw} of card {card_id} from user {user_id}'s subcollection {subcollection_name}, {remaining_quantity} remaining")
 
         # Execute the transaction
         transaction = db_client.transaction()
-        await move_card_to_shipped(transaction, source_card_ref, shipped_card_ref, remaining_quantity, quantity)
+        await create_withdraw_request(transaction, source_card_ref, request_card_ref, remaining_quantity, quantity)
 
-        # Get the updated shipped card
-        updated_shipped_card_doc = await shipped_card_ref.get()
-        updated_shipped_card_data = updated_shipped_card_doc.to_dict()
+        # Get the updated card from the withdraw request
+        updated_request_card_doc = await request_card_ref.get()
+        updated_request_card_data = updated_request_card_doc.to_dict()
 
         # Ensure ID is part of the data
-        if 'id' not in updated_shipped_card_data:
-            updated_shipped_card_data['id'] = card_id
+        if 'id' not in updated_request_card_data:
+            updated_request_card_data['id'] = card_id
 
         # Generate signed URL for the card image
-        if 'image_url' in updated_shipped_card_data and updated_shipped_card_data['image_url']:
+        if 'image_url' in updated_request_card_data and updated_request_card_data['image_url']:
             try:
-                updated_shipped_card_data['image_url'] = await generate_signed_url(updated_shipped_card_data['image_url'])
+                updated_request_card_data['image_url'] = await generate_signed_url(updated_request_card_data['image_url'])
             except Exception as sign_error:
-                logger.error(f"Failed to generate signed URL for {updated_shipped_card_data['image_url']}: {sign_error}")
+                logger.error(f"Failed to generate signed URL for {updated_request_card_data['image_url']}: {sign_error}")
                 # Keep the original URL if signing fails
 
-        # Create and return a UserCard object from the updated shipped card data
-        shipped_card = UserCard(
-            card_reference=updated_shipped_card_data.get("card_reference", ""),
-            card_name=updated_shipped_card_data.get("card_name", ""),
-            date_got=updated_shipped_card_data.get("date_got"),
-            id=updated_shipped_card_data.get("id", card_id),
-            image_url=updated_shipped_card_data.get("image_url", ""),
-            point_worth=updated_shipped_card_data.get("point_worth", 0),
-            quantity=updated_shipped_card_data.get("quantity", 0),
-            rarity=updated_shipped_card_data.get("rarity", 1)
+        # Create and return a UserCard object from the updated request card data
+        withdrawn_card = UserCard(
+            card_reference=updated_request_card_data.get("card_reference", ""),
+            card_name=updated_request_card_data.get("card_name", ""),
+            date_got=updated_request_card_data.get("date_got"),
+            id=updated_request_card_data.get("id", card_id),
+            image_url=updated_request_card_data.get("image_url", ""),
+            point_worth=updated_request_card_data.get("point_worth", 0),
+            quantity=updated_request_card_data.get("quantity", 0),
+            rarity=updated_request_card_data.get("rarity", 1)
         )
 
         # Add optional fields if they exist in the data
-        if "expireAt" in updated_shipped_card_data:
-            shipped_card.expireAt = updated_shipped_card_data["expireAt"]
-        if "buybackexpiresAt" in updated_shipped_card_data:
-            shipped_card.buybackexpiresAt = updated_shipped_card_data["buybackexpiresAt"]
-        if "request_date" in updated_shipped_card_data:
-            shipped_card.request_date = updated_shipped_card_data["request_date"]
+        if "expireAt" in updated_request_card_data:
+            withdrawn_card.expireAt = updated_request_card_data["expireAt"]
+        if "buybackexpiresAt" in updated_request_card_data:
+            withdrawn_card.buybackexpiresAt = updated_request_card_data["buybackexpiresAt"]
+        if "request_date" in updated_request_card_data:
+            withdrawn_card.request_date = updated_request_card_data["request_date"]
 
         # Log success message
         if remaining_quantity <= 0:
-            logger.info(f"Successfully moved all {quantity} of card {card_id} from user {user_id}'s subcollection {subcollection_name} to 'shipped'")
+            logger.info(f"Successfully created withdraw request for all {quantity} of card {card_id} from user {user_id}'s subcollection {subcollection_name}")
         else:
-            logger.info(f"Successfully moved {quantity} of card {card_id} from user {user_id}'s subcollection {subcollection_name} to 'shipped', {remaining_quantity} remaining")
+            logger.info(f"Successfully created withdraw request for {quantity} of card {card_id} from user {user_id}'s subcollection {subcollection_name}, {remaining_quantity} remaining")
 
-        return shipped_card
+        return withdrawn_card
 
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error withdrawing/shipping card {card_id} for user {user_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to withdraw/ship card: {str(e)}")
+        logger.error(f"Error creating withdraw request for card {card_id} for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create withdraw request: {str(e)}")
 
 async def get_user_card(
     user_id: str,
@@ -2519,7 +2749,8 @@ async def offer_points(
     user_id: str,
     listing_id: str,
     offer_request: OfferPointsRequest,
-    db_client: AsyncClient
+    db_client: AsyncClient,
+    expired: int = 7
 ) -> CardListing:
     """
     Offer points for a listing.
@@ -2537,6 +2768,7 @@ async def offer_points(
         listing_id: The ID of the listing to offer points for
         offer_request: The OfferPointsRequest containing the points to offer
         db_client: Firestore async client
+        expired: Number of days until the offer expires (default: 7)
 
     Returns:
         CardListing: The updated listing
@@ -2569,6 +2801,7 @@ async def offer_points(
 
         # 4. Create a new offer document in the "point_offers" subcollection
         now = datetime.now()
+        expires_at = now + timedelta(days=expired)  # Calculate expiration date
 
         # Get the point_offers subcollection reference
         point_offers_ref = listing_ref.collection('point_offers')
@@ -2579,7 +2812,8 @@ async def offer_points(
             "amount": offer_request.points,  # Points offered
             "at": now,  # Timestamp of the offer
             "offerreference": new_offer_ref.id,  # Reference to this offer
-            "type": "point"  # Indicate this is a point offer
+            "type": "point",  # Indicate this is a point offer
+            "expiresAt": expires_at  # Add expiration date
         }
 
         # Get the user's my_point_offers subcollection reference
@@ -2977,11 +3211,256 @@ async def update_cash_offer(
         logger.error(f"Error updating cash offer {offer_id} for listing {listing_id} by user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update cash offer: {str(e)}")
 
+async def check_card_missing(
+    user_id: str,
+    fusion_recipe_ids: List[str],
+    db_client: AsyncClient
+) -> CheckCardMissingResponse:
+    """
+    Check which cards are missing for a user to perform fusion with specified recipes.
+
+    This function:
+    1. Retrieves the fusion recipes from Firestore
+    2. For each recipe, checks which ingredients the user is missing
+    3. Returns detailed information about missing cards for each recipe
+
+    Args:
+        user_id: The ID of the user to check cards for
+        fusion_recipe_ids: List of fusion recipe IDs to check
+        db_client: Firestore client
+
+    Returns:
+        CheckCardMissingResponse with details about missing cards for each recipe
+
+    Raises:
+        HTTPException: If there's an error checking the cards
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Initialize response
+        recipes_missing_cards = []
+
+        # Process each fusion recipe
+        for recipe_id in fusion_recipe_ids:
+            # Get the fusion recipe
+            recipe_ref = db_client.collection('fusion_recipes').document(recipe_id)
+            recipe_doc = await recipe_ref.get()
+
+            if not recipe_doc.exists:
+                # Skip non-existent recipes and continue with the next one
+                logger.warning(f"Fusion recipe with ID '{recipe_id}' not found")
+                continue
+
+            recipe_data = recipe_doc.to_dict()
+
+            # Initialize recipe missing cards info
+            recipe_missing_cards = FusionRecipeMissingCards(
+                recipe_id=recipe_id,
+                recipe_name=recipe_data.get('name'),
+                result_card_name=recipe_data.get('result_card_name'),
+                result_card_image=recipe_data.get('result_card_image'),
+                missing_cards=[]
+            )
+
+            # Check each ingredient
+            ingredients = recipe_data.get('ingredients', [])
+            all_cards_available = True
+
+            for ingredient in ingredients:
+                card_collection_id = ingredient.get('card_collection_id')
+                card_id = ingredient.get('card_id')
+                required_quantity = ingredient.get('quantity', 1)
+
+                # Check if the user has this card in their collection
+                card_ref = user_ref.collection('cards').document('cards').collection(card_collection_id).document(card_id)
+                card_doc = await card_ref.get()
+
+                user_quantity = 0
+                if card_doc.exists:
+                    card_data = card_doc.to_dict()
+                    user_quantity = card_data.get('quantity', 0)
+
+                # If user doesn't have enough, add to missing cards
+                if not card_doc.exists or user_quantity < required_quantity:
+                    all_cards_available = False
+
+                    # Try to get additional card info from the storage service
+                    card_name = ingredient.get('card_name')
+                    image_url = ingredient.get('image_url')
+
+                    try:
+                        # Only fetch card details if we don't already have them
+                        if not card_name or not image_url:
+                            card_details = await get_card_by_id_from_service(card_id, card_collection_id)
+                            card_name = card_details.get('name', card_name)
+                            image_url = card_details.get('image_url', image_url)
+                    except Exception as e:
+                        logger.warning(f"Could not fetch card details for {card_collection_id}/{card_id}: {e}")
+
+                    missing_card = MissingCard(
+                        card_collection_id=card_collection_id,
+                        card_id=card_id,
+                        required_quantity=required_quantity,
+                        user_quantity=user_quantity,
+                        card_name=card_name,
+                        image_url=image_url
+                    )
+                    recipe_missing_cards.missing_cards.append(missing_card)
+
+            # Update has_all_cards flag
+            recipe_missing_cards.has_all_cards = all_cards_available
+
+            # Add to response
+            recipes_missing_cards.append(recipe_missing_cards)
+
+        return CheckCardMissingResponse(recipes=recipes_missing_cards)
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error checking missing cards for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to check missing cards: {str(e)}")
+
+async def accept_offer(
+    user_id: str,
+    listing_id: str,
+    offer_type: str,
+    db_client: AsyncClient
+) -> CardListing:
+    """
+    Accept the highest offer (cash or point) for a listing.
+
+    This function:
+    1. Verifies the listing exists and belongs to the user
+    2. Finds the highest offer of the specified type
+    3. Updates the status of the offer to "accepted"
+    4. Sets the payment_due date to 2 days after the accept time
+    5. Returns the updated listing
+
+    Args:
+        user_id: The ID of the user accepting the offer (must be the listing owner)
+        listing_id: The ID of the listing
+        offer_type: The type of offer to accept ("cash" or "point")
+        db_client: Firestore async client
+
+    Returns:
+        CardListing: The updated listing
+
+    Raises:
+        HTTPException: If there's an error accepting the offer
+    """
+    logger = get_logger(__name__)
+    try:
+        # 1. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+        # 2. Verify the user is the owner of the listing
+        owner_reference = listing_data.get("owner_reference", "")
+        expected_owner_path = f"{settings.firestore_collection_users}/{user_id}"
+
+        if owner_reference != expected_owner_path:
+            raise HTTPException(status_code=403, detail="You can only accept offers for your own listings")
+
+        # 3. Find the highest offer of the specified type
+        # Handle both singular and plural forms of "point"
+        if offer_type.lower() == "point":
+            highest_offer_field = "highestOfferPoints"
+        else:
+            highest_offer_field = f"highestOffer{offer_type.capitalize()}"
+
+        highest_offer = listing_data.get(highest_offer_field, None)
+
+        if not highest_offer:
+            raise HTTPException(status_code=404, detail=f"No {offer_type} offers found for this listing")
+
+        # 4. Set the accept time and payment due date
+        now = datetime.now()
+        payment_due = now + timedelta(days=2)  # Payment due in 2 days
+
+        # 5. Update the offer status in the listing
+        highest_offer["status"] = "accepted"
+        highest_offer["payment_due"] = payment_due
+
+        # 6. Find the offer in the user's offers collection and update it
+        offerer_ref_path = highest_offer.get("offererRef", "")
+        offer_reference = highest_offer.get("offerreference", "")
+
+        if not offerer_ref_path or not offer_reference:
+            raise HTTPException(status_code=500, detail="Invalid offer data")
+
+        # Get the offer subcollection reference
+        offers_subcollection = f"{offer_type}_offers"
+        offer_ref = listing_ref.collection(offers_subcollection).document(offer_reference)
+
+        # Get the user's my_offers subcollection reference
+        offerer_ref = db_client.document(offerer_ref_path)
+        my_offers_subcollection = f"my_{offer_type}_offers"
+
+        # Find the offer in the user's my_offers subcollection
+        my_offers_query = offerer_ref.collection(my_offers_subcollection).where("listingId", "==", listing_id)
+        my_offers_docs = await my_offers_query.get()
+
+        if not my_offers_docs:
+            logger.warning(f"No matching offer found in user's my_{offer_type}_offers collection")
+
+        # 7. Update the listing and the offer in a transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # Update the listing with the accepted offer
+            tx.update(listing_ref, {
+                highest_offer_field: highest_offer,
+                "status": "accepted",
+                "payment_due": payment_due
+            })
+
+            # Update the offer in the listing's offers subcollection
+            tx.update(offer_ref, {
+                "status": "accepted",
+                "payment_due": payment_due
+            })
+
+            # Update the offer in the user's my_offers subcollection if found
+            for doc in my_offers_docs:
+                tx.update(doc.reference, {
+                    "status": "accepted",
+                    "payment_due": payment_due
+                })
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        # 8. Get the updated listing
+        updated_listing_doc = await listing_ref.get()
+        updated_listing_data = updated_listing_doc.to_dict()
+
+        logger.info(f"Successfully accepted {offer_type} offer for listing {listing_id}")
+        return CardListing(**updated_listing_data)
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error accepting {offer_type} offer for listing {listing_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to accept offer: {str(e)}")
+
 async def offer_cash(
     user_id: str,
     listing_id: str,
     offer_request: OfferCashRequest,
-    db_client: AsyncClient
+    db_client: AsyncClient,
+    expired: int = 7
 ) -> CardListing:
     """
     Offer cash for a listing.
@@ -2999,6 +3478,7 @@ async def offer_cash(
         listing_id: The ID of the listing to offer cash for
         offer_request: The OfferCashRequest containing the cash amount to offer
         db_client: Firestore async client
+        expired: Number of days until the offer expires (default: 7)
 
     Returns:
         CardListing: The updated listing
@@ -3031,6 +3511,7 @@ async def offer_cash(
 
         # 4. Create a new offer document in the "cash_offers" subcollection
         now = datetime.now()
+        expires_at = now + timedelta(days=expired)  # Calculate expiration date
 
         # Get the cash_offers subcollection reference
         cash_offers_ref = listing_ref.collection('cash_offers')
@@ -3041,7 +3522,8 @@ async def offer_cash(
             "amount": offer_request.cash,  # Cash offered
             "at": now,  # Timestamp of the offer
             "offerreference": new_offer_ref.id,  # Reference to this offer
-            "type": "cash"  # Indicate this is a cash offer
+            "type": "cash",  # Indicate this is a cash offer
+            "expiresAt": expires_at  # Add expiration date
         }
 
         # Get the user's my_cash_offers subcollection reference

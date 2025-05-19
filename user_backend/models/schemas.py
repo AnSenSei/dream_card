@@ -18,24 +18,20 @@ class CreateAccountRequest(BaseModel):
     displayName: str = "AnSenSei"
     avatar: Optional[str] = None  # URL or path to user's avatar image
     addresses: List[Address] = []
-    currentMonthKey: Optional[str] = None
-    lastMonthKey: Optional[str] = None
+    totalFusion: int = 0
 
 class User(BaseModel):
     """Model for a user with all fields"""
     createdAt: datetime
-    currentMonthCash: int = 0
-    currentMonthKey: str
     displayName: str
     email: str
     addresses: List[Address] = []  # Changed from allow_to_address to addresses
     avatar: Optional[str] = None  # URL or path to user's avatar image
-    lastMonthCash: int = 0
-    lastMonthKey: str
     level: int = 1
     pointsBalance: int = 0
     totalCashRecharged: int = 0
     totalPointsSpent: int = 0
+    totalFusion: int = 0  # Added new field
 
     class Config:
         from_attributes = True
@@ -97,6 +93,7 @@ class DrawnCard(BaseModel):
     point_worth: Optional[int] = None
     quantity: Optional[int] = None
     rarity: Optional[int] = None
+    num_draw: Optional[int] = None  # Position of the card in the drawing sequence
     # Allow additional fields with any type
     model_config = {
         "extra": "allow"
@@ -167,6 +164,50 @@ class UpdatePointOfferRequest(BaseModel):
 class UpdateCashOfferRequest(BaseModel):
     """Request model for updating a cash offer for a listing"""
     cash: float = Field(..., gt=0, description="The new amount of cash to offer (must be greater than the current offer)")
+
+class AcceptOfferRequest(BaseModel):
+    """Request model for accepting an offer for a listing"""
+    offer_type: str = Field(..., description="The type of offer to accept (cash or point)")
+
+class CheckCardMissingRequest(BaseModel):
+    """Request model for checking missing cards for fusion recipes"""
+    fusion_recipe_ids: List[str] = Field(..., description="List of fusion recipe IDs to check")
+
+class MissingCard(BaseModel):
+    """Model for a missing card required for fusion"""
+    card_collection_id: str
+    card_id: str
+    required_quantity: int
+    user_quantity: int = 0
+    card_name: Optional[str] = None
+    image_url: Optional[str] = None
+
+class FusionRecipeMissingCards(BaseModel):
+    """Model for missing cards for a specific fusion recipe"""
+    recipe_id: str
+    recipe_name: Optional[str] = None
+    result_card_name: Optional[str] = None
+    result_card_image: Optional[str] = None
+    missing_cards: List[MissingCard]
+    has_all_cards: bool = False
+
+class CheckCardMissingResponse(BaseModel):
+    """Response model for checking missing cards for fusion recipes"""
+    recipes: List[FusionRecipeMissingCards]
+
+class CardToWithdraw(BaseModel):
+    """Model for a card to withdraw"""
+    card_id: str = Field(..., description="The ID of the card to withdraw")
+    quantity: int = Field(1, gt=0, description="The quantity to withdraw (default: 1)")
+
+class WithdrawCardsRequest(BaseModel):
+    """Request model for withdrawing multiple cards"""
+    cards: List[CardToWithdraw] = Field(..., description="List of cards to withdraw")
+    subcollection_name: str = Field(..., description="The name of the subcollection where the cards are stored")
+
+class WithdrawCardsResponse(BaseModel):
+    """Response model for withdrawing multiple cards"""
+    cards: List[UserCard] = Field(..., description="List of withdrawn cards")
 
 class UserListResponse(BaseModel):
     """Response model for listing users"""

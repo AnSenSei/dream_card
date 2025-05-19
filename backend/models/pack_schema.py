@@ -20,6 +20,7 @@ class AddPackRequest(BaseModel):
     """
     pack_name: str
     collection_id: str
+    price: int
     win_rate: Optional[int] = None
     is_active: bool = False
     popularity: Optional[int] = 0
