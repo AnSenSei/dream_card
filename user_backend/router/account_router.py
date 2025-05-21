@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body
+from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body, File, UploadFile
 from typing import Optional, List
 from google.cloud import firestore
 
@@ -9,7 +9,9 @@ from service.user_service import (
     add_user_address,
     delete_user_address,
     add_points_to_user,
-    create_account
+    create_account,
+    update_user_avatar,
+    update_seed
 )
 from config import get_firestore_client, get_logger
 
@@ -162,3 +164,64 @@ async def add_points_to_user_route(
     except Exception as e:
         logger.error(f"Error adding points to user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while adding points to the user")
+
+@router.post("/{user_id}/avatar", response_model=User)
+async def upload_avatar_route(
+    user_id: str = Path(..., description="The ID of the user to update"),
+    avatar: UploadFile = File(..., description="The avatar image file"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Upload a new avatar image for a user.
+
+    This endpoint:
+    1. Takes a user ID and avatar image file as input
+    2. Uploads the avatar image to cloud storage
+    3. Updates the user's avatar field with the URL
+    4. Returns the updated User object
+    """
+    try:
+        # Read the file content
+        file_content = await avatar.read()
+
+        # Get the content type
+        content_type = avatar.content_type
+
+        updated_user = await update_user_avatar(
+            user_id=user_id,
+            avatar=file_content,
+            content_type=content_type,
+            db_client=db
+        )
+        return updated_user
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading avatar for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while uploading the avatar")
+
+@router.put("/{user_id}/seed", response_model=User)
+async def update_seed_route(
+    user_id: str = Path(..., description="The ID of the user to update"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Update a user's clientSeed with a new random value.
+
+    This endpoint:
+    1. Takes a user ID as input
+    2. Generates a new random clientSeed
+    3. Updates the user's clientSeed field
+    4. Returns the updated User object
+    """
+    try:
+        updated_user = await update_seed(
+            user_id=user_id,
+            db_client=db
+        )
+        return updated_user
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating seed for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while updating the user's seed")

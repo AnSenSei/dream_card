@@ -58,6 +58,7 @@ async def create_pack_in_firestore(
     collection_id = pack_data.collection_id
     price = pack_data.price
     win_rate = pack_data.win_rate
+    max_win = pack_data.max_win
     is_active = pack_data.is_active
     popularity = pack_data.popularity
 
@@ -129,6 +130,7 @@ async def create_pack_in_firestore(
             "created_at": firestore.SERVER_TIMESTAMP,
             "price": price,
             "win_rate": win_rate,
+            "max_win": max_win,
             "is_active": is_active,
             "popularity": popularity,
         }
@@ -185,6 +187,8 @@ async def get_all_packs_from_firestore(db_client: firestore.AsyncClient) -> List
                 description=pack_data.get('description'), 
                 rarity_probabilities=pack_data.get('rarity_probabilities'), 
                 cards_by_rarity=pack_data.get('cards_by_rarity'),
+                win_rate=pack_data.get('win_rate'),
+                max_win=pack_data.get('max_win'),
                 popularity=pack_data.get('popularity', 0)
                 # rarity_configurations is intentionally omitted here as per user request
             ))
@@ -246,6 +250,7 @@ async def get_packs_collection_from_firestore(collection_id: str, db_client: fir
                 name=pack_name,
                 image_url=signed_image_url,
                 win_rate=pack_data.get('win_rate'),
+                max_win=pack_data.get('max_win'),
                 popularity=pack_data.get('popularity', 0)
             )
             packs_list.append(pack)
@@ -367,6 +372,8 @@ async def _process_pack_document(doc_snapshot, db_client, collection_id):
             description=pack_data.get('description'),
             rarity_probabilities=pack_data.get('rarity_probabilities'),
             cards_by_rarity=pack_data.get('cards_by_rarity'),
+            win_rate=pack_data.get('win_rate'),
+            max_win=pack_data.get('max_win'),
             popularity=pack_data.get('popularity', 0),
             rarity_configurations=rarity_configurations # Add fetched rarities
         )
@@ -390,6 +397,7 @@ async def add_card_to_pack_rarity(
     - quantity: Card quantity (updated after each draw)
     - point: Card point value (updated after each draw)
     - image_url: URL to the card image
+    - condition: Card condition (e.g., "mint", "near mint", etc.)
     """
     try:
         # Check if pack exists
@@ -413,7 +421,8 @@ async def add_card_to_pack_rarity(
             "name": card_data.name,
             "quantity": card_data.quantity,
             "point": card_data.point,
-            "image_url": card_data.image_url
+            "image_url": card_data.image_url,
+            "condition": getattr(card_data, "condition", "new")  # Default to "mint" if not provided
         }
 
         # Add card to the rarity
@@ -445,6 +454,7 @@ async def add_card_from_storage_to_pack(
     /packs/{packId}/rarities/{rarityId}/cards/{cardId} with fields:
     - globalRef: DocumentReference to the global card
     - name, quantity, point, image_url: copied from the storage card
+    - condition: Card condition (e.g., "mint", "near mint", etc.)
     """
     from service.storage_service import get_card_by_id
 
@@ -483,7 +493,8 @@ async def add_card_from_storage_to_pack(
             "name": card_data.card_name,
             "quantity": card_data.quantity,
             "point": card_data.point_worth,
-            "image_url": card_data.image_url
+            "image_url": card_data.image_url,
+            "condition": getattr(card_data, "condition", "new")  # Default to "mint" if not provided
         }
 
         # Add card to the rarity
@@ -503,7 +514,8 @@ async def add_card_direct_to_pack(
     document_id: str,
     pack_id: str,
     probability: float,
-    db_client: AsyncClient
+    db_client: AsyncClient,
+    condition: str = "mint"
 ) -> bool:
     """
     Adds a card directly to a pack with its own probability.
@@ -515,6 +527,7 @@ async def add_card_direct_to_pack(
         pack_id: The ID of the pack to add the card to (can include collection_id, formatted as 'collection_id/pack_id')
         probability: The probability value for the card (0.0 to 1.0)
         db_client: Firestore client
+        condition: The condition of the card (e.g., "mint", "near mint", etc.)
 
     Returns:
         bool: True if successfully added
@@ -579,8 +592,9 @@ async def add_card_direct_to_pack(
             "card_name": card_info.card_name,
             "quantity": card_info.quantity,
             "point_worth": card_info.point_worth,
-            "rarity":card_info.rarity,
-            "probability": probability
+            "rarity": card_info.rarity,
+            "probability": probability,
+            "condition": getattr(card_info, "condition", "new")  # Default to "mint" if not provided
         }
 
         # Add image_url if available
@@ -695,7 +709,7 @@ async def update_pack_in_firestore(
 
     batch = db_client.batch()
 
-    # Handle updates to top-level pack document fields (e.g., name, description, popularity)
+    # Handle updates to top-level pack document fields (e.g., name, description, popularity, max_win)
     pack_level_updates = {}
     if "name" in updates: # Client might send None if they want to clear a field (if allowed)
         # Firestore behavior with None: can store as null or might be an issue depending on rules/schema.
@@ -707,6 +721,8 @@ async def update_pack_in_firestore(
         pack_level_updates["description"] = updates["description"]
     if "popularity" in updates:
         pack_level_updates["popularity"] = updates["popularity"]
+    if "max_win" in updates:
+        pack_level_updates["max_win"] = updates["max_win"]
 
     if pack_level_updates: # If there are any top-level fields to update
         batch.update(pack_ref, pack_level_updates)

@@ -15,7 +15,9 @@ from service.user_service import (
     perform_fusion,
     perform_random_fusion,
     get_user_card,
-    check_card_missing
+    check_card_missing,
+    add_card_to_highlights,
+    delete_card_from_highlights
 )
 from config import get_firestore_client, get_logger
 
@@ -303,34 +305,92 @@ async def get_user_card_route(
         logger.error(f"Error getting card for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while retrieving the card")
 
-@router.post("/{user_id}/fusion", response_model=PerformFusionResponse)
-async def perform_fusion_route(
-    user_id: str = Path(..., description="The ID of the user performing the fusion"),
-    fusion_request: PerformFusionRequest = Body(..., description="The fusion recipe to use"),
+@router.post("/{user_id}/cards/{card_collection_id}/{card_id}/highlights", response_model=UserCard)
+async def add_card_to_highlights_route(
+    user_id: str = Path(..., description="The ID of the user who owns the card"),
+    card_collection_id: str = Path(..., description="The collection ID of the card (e.g., 'pokemon')"),
+    card_id: str = Path(..., description="The ID of the card to add to highlights"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
-    Perform a fusion operation for a user.
+    Add a card to the user's highlights subcollection.
 
     This endpoint:
-    1. Takes a user ID and fusion recipe ID as arguments
-    2. Checks if the user has all required ingredients for the fusion
-    3. If yes, performs the fusion by removing ingredient cards and adding the result card
-    4. If no, returns an error message about missing cards
-    5. Returns a success/failure message and the resulting card if successful
+    1. Takes a user ID, card collection ID, and card ID as path parameters
+    2. Finds the card in the user's collection
+    3. Adds the card to the highlights subcollection
+    4. Returns the card that was added to highlights
     """
     try:
-        fusion_result = await perform_fusion(
+        card = await add_card_to_highlights(
             user_id=user_id,
-            result_card_id=fusion_request.result_card_id,
+            card_collection_id=card_collection_id,
+            card_id=card_id,
             db_client=db
         )
-        return fusion_result
+        return card
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error performing fusion for user: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An error occurred while performing the fusion")
+        logger.error(f"Error adding card to highlights for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while adding the card to highlights")
+
+@router.delete("/{user_id}/highlights/{card_id}", response_model=dict)
+async def delete_card_from_highlights_route(
+    user_id: str = Path(..., description="The ID of the user who owns the card"),
+    card_id: str = Path(..., description="The ID of the card to delete from highlights"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Delete a card from the user's highlights collection.
+
+    This endpoint:
+    1. Takes a user ID and card ID as path parameters
+    2. Checks if the card exists in the user's highlights collection
+    3. Deletes the card from the highlights collection
+    4. Returns a success message
+    """
+    try:
+        result = await delete_card_from_highlights(
+            user_id=user_id,
+            card_id=card_id,
+            db_client=db
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting card from highlights for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while deleting the card from highlights")
+
+# @router.post("/{user_id}/fusion", response_model=PerformFusionResponse)
+# async def perform_fusion_route(
+#     user_id: str = Path(..., description="The ID of the user performing the fusion"),
+#     fusion_request: PerformFusionRequest = Body(..., description="The fusion recipe to use"),
+#     db: firestore.AsyncClient = Depends(get_firestore_client)
+# ):
+#     """
+#     Perform a fusion operation for a user.
+#
+#     This endpoint:
+#     1. Takes a user ID and fusion recipe ID as arguments
+#     2. Checks if the user has all required ingredients for the fusion
+#     3. If yes, performs the fusion by removing ingredient cards and adding the result card
+#     4. If no, returns an error message about missing cards
+#     5. Returns a success/failure message and the resulting card if successful
+#     """
+#     try:
+#         fusion_result = await perform_fusion(
+#             user_id=user_id,
+#             result_card_id=fusion_request.result_card_id,
+#             db_client=db
+#         )
+#         return fusion_result
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Error performing fusion for user: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail="An error occurred while performing the fusion")
 
 @router.post("/{user_id}/fusion_recipes/{result_card_id}", response_model=PerformFusionResponse)
 async def perform_fusion_by_recipe_id_route(

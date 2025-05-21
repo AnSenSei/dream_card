@@ -79,6 +79,7 @@ async def add_pack_route(
     collection_id: str = Form(...),
     price: int = Form(...),
     win_rate: Optional[int] = Form(None),
+    max_win: Optional[int] = Form(None),
     popularity: Optional[int] = Form(None),
     db: firestore.AsyncClient = Depends(get_firestore_client),
     storage_client: storage.Client = Depends(get_storage_client),
@@ -92,6 +93,7 @@ async def add_pack_route(
     - **collection_id**: ID of the pack collection (sent as form field).
     - **price**: Price of the pack (sent as form field).
     - **win_rate**: Optional win rate for the pack (sent as form field).
+    - **max_win**: Optional maximum win value for the pack (sent as form field).
     - **popularity**: Optional popularity value for the pack (sent as form field). Defaults to 0 if not provided.
     - **image_file**: Optional image file for the pack.
     """
@@ -101,6 +103,7 @@ async def add_pack_route(
             collection_id=collection_id,
             price=price,
             win_rate=win_rate,
+            max_win=max_win,
             is_active=False,
             popularity=popularity
         )
@@ -111,6 +114,8 @@ async def add_pack_route(
             "pack_name": pack_name,
             "collection_id": collection_id,
             "price": str(price),
+            "win_rate": str(win_rate if win_rate is not None else "None"),
+            "max_win": str(max_win if max_win is not None else "None"),
             "popularity": str(popularity if popularity is not None else 0),
             "message": f"Pack '{pack_name}' created successfully in collection '{collection_id}'"
         }
@@ -145,11 +150,12 @@ async def add_card_to_pack_direct_route(
     - quantity: Card quantity (updated after each draw)
     - point: Card point value (updated after each draw)
     - probability: The probability value for the card (0.0 to 1.0)
+    - condition: The condition of the card (e.g., "mint", "near mint", etc.)
 
     Args:
         collection_id: The ID of the pack collection containing the pack
         pack_id: The ID of the pack to add the card to
-        request: AddCardToPackDirectRequest containing collection_metadata_id, document_id, and probability
+        request: AddCardToPackDirectRequest containing collection_metadata_id, document_id, probability, and condition
         db: Firestore client dependency
 
     Returns:
@@ -165,7 +171,8 @@ async def add_card_to_pack_direct_route(
             document_id=request.document_id,
             pack_id=pack_path,
             probability=request.probability,
-            db_client=db
+            db_client=db,
+            condition=request.condition
         )
         return {
             "message": f"Successfully added card '{request.document_id}' directly to pack '{pack_id}' in collection '{collection_id}' with probability {request.probability}",
@@ -298,6 +305,52 @@ async def get_pack_cards_route(
     except Exception as e:
         logger.error(f"Unhandled error in get_pack_cards_route: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while retrieving cards from the pack.")
+
+@router.patch("/{collection_id}/{pack_id}/max_win", response_model=Dict[str, str])
+async def update_max_win_route(
+    collection_id: str,
+    pack_id: str,
+    max_win: int = Form(...),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Updates the max_win value for a specific pack.
+
+    Args:
+        collection_id: The ID of the pack collection containing the pack
+        pack_id: The ID of the pack to update
+        max_win: The new max_win value for the pack
+        db: Firestore client dependency
+
+    Returns:
+        Dictionary with success message
+    """
+    try:
+        # Pass the collection_id as part of the pack_id path parameter
+        # Format: collection_id/pack_id
+        pack_path = f"{collection_id}/{pack_id}"
+
+        # Create an updates dictionary with just the max_win field
+        updates = {"max_win": max_win}
+
+        # Use the existing update_pack_in_firestore function to update the pack
+        await update_pack_in_firestore(
+            pack_id=pack_path,
+            updates=updates,
+            db_client=db
+        )
+        return {
+            "message": f"Successfully updated max_win to {max_win} for pack '{pack_id}' in collection '{collection_id}'",
+            "pack_id": pack_id,
+            "collection_id": collection_id,
+            "max_win": str(max_win)
+        }
+    except HTTPException:
+        # Re-raise HTTPExceptions from the service layer
+        raise
+    except Exception as e:
+        logger.error(f"Unhandled error in update_max_win_route: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred while updating the pack's max_win value.")
 
 @router.delete("/{collection_id}/{pack_id}", response_model=Dict[str, str])
 async def delete_pack_route(

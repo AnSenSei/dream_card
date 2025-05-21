@@ -10,6 +10,7 @@ from config import get_logger, instrument_app, settings # Assuming settings migh
 from router import packs_router # Your existing routers
 from router import storage_router # Import the storage router
 from router import fusion_router # Import the fusion router
+from router import marketplace_router # Import the marketplace router
 
 # Configure logging with structured logger
 logger = get_logger("main") # Use the logger from config
@@ -71,7 +72,8 @@ logger.info(f"SessionMiddleware added to /api/{API_VERSION} with a generated SEC
 api_v1.include_router(packs_router.router)
 api_v1.include_router(storage_router.router) # Include the storage router
 api_v1.include_router(fusion_router.router) # Include the fusion router
-logger.info("Gacha routers (packs, cards, draw), storage router, and fusion router included in the sub-API.")
+api_v1.include_router(marketplace_router.router) # Include the marketplace router
+logger.info("Gacha routers (packs, cards, draw), storage router, fusion router, and marketplace router included in the sub-API.")
 
 
 # Mount the sub-API (api_v1) under the main app (app)

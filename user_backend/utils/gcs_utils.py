@@ -104,13 +104,14 @@ async def generate_signed_url(gcs_uri: str) -> str:
         logger.error(f"Error generating signed URL for {gcs_uri}: {e}", exc_info=True)
         return gcs_uri # Fallback: Return original URI if signing fails
 
-async def upload_avatar_to_gcs(avatar_data: str, user_id: str) -> str:
+async def upload_avatar_to_gcs(avatar_data: bytes, user_id: str, content_type: str = None) -> str:
     """
     Uploads an avatar image to Google Cloud Storage.
 
     Args:
-        avatar_data: Either a base64 encoded image data string or binary data
+        avatar_data: Binary image data
         user_id: The ID of the user whose avatar is being uploaded
+        content_type: The content type of the image (e.g., "image/jpeg")
 
     Returns:
         The GCS URI of the uploaded avatar
@@ -119,29 +120,21 @@ async def upload_avatar_to_gcs(avatar_data: str, user_id: str) -> str:
         HTTPException: If there's an error uploading the avatar
     """
     try:
-        # Check if avatar_data is a base64 encoded image
-        if avatar_data and avatar_data.startswith(('data:image/', 'data:application/')):
-            # Extract content type and base64 data
-            content_type, base64_data = parse_base64_image(avatar_data)
+        binary_data = avatar_data
 
-            # Decode the base64 data to binary
-            binary_data = base64.b64decode(base64_data)
-        else:
-            # Assume it's binary data
+        # If content_type is not provided, try to determine it
+        if not content_type:
             # Try to determine content type from the binary data
             import magic
             try:
                 mime = magic.Magic(mime=True)
-                content_type = mime.from_buffer(avatar_data)
-                binary_data = avatar_data
+                content_type = mime.from_buffer(binary_data)
             except ImportError:
                 # If python-magic is not installed, default to octet-stream
                 content_type = 'application/octet-stream'
-                binary_data = avatar_data
             except Exception as e:
                 logger.warning(f"Could not determine content type from binary data: {e}")
                 content_type = 'application/octet-stream'
-                binary_data = avatar_data
 
         # Generate a unique filename for the avatar
         filename = f"{user_id}_{uuid.uuid4()}.{get_file_extension(content_type)}"

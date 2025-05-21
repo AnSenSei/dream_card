@@ -3,15 +3,20 @@ from uuid import UUID
 import random
 import math
 import re
+import secrets
+import hashlib
+import hmac
 from datetime import datetime, timedelta
 
 from fastapi import HTTPException
 import httpx
+import asyncpg
 from google.cloud import firestore
 from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_transactional, Increment
 
 from config import get_logger, settings
-from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CheckCardMissingResponse, MissingCard, FusionRecipeMissingCards
+from config.db_connection import db_connection
+from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CheckCardMissingResponse, MissingCard, FusionRecipeMissingCards, RankEntry
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs
 
 logger = get_logger(__name__)
@@ -112,6 +117,17 @@ async def get_user_by_id(user_id: str, db_client: AsyncClient) -> Optional[User]
             return None
 
         user_data = user_doc.to_dict()
+
+        # Generate a signed URL for the avatar if it's a GCS URI
+        avatar_url = user_data.get('avatar')
+        if avatar_url and avatar_url.startswith('gs://'):
+            try:
+                user_data['avatar'] = await generate_signed_url(avatar_url)
+                logger.info(f"Generated signed URL for user {user_id}'s avatar")
+            except Exception as e:
+                logger.error(f"Failed to generate signed URL for user {user_id}'s avatar: {e}")
+                # Keep the original avatar URL if signing fails
+
         return User(**user_data)
     except Exception as e:
         logger.error(f"Error getting user {user_id}: {e}", exc_info=True)
@@ -215,7 +231,9 @@ async def draw_card_from_pack(collection_id: str, pack_id: str, db_client: Async
         logger.error(f"Error drawing card from pack '{pack_id}' in collection '{collection_id}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to draw card from pack '{pack_id}' in collection '{collection_id}': {str(e)}")
 
-async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_id: str, db_client: AsyncClient, count: int = 5) -> list:
+
+async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_id: str, db_client: AsyncClient,
+                                        count: int = 5) -> list:
     """
     Draw multiple cards (1,5 or 10) from a pack based on probabilities.
 
@@ -241,7 +259,7 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
     """
     try:
         # Validate count parameter
-        if count not in [1,5, 10]:
+        if count not in [1, 5, 10]:
             logger.error(f"Invalid count parameter: {count}. Must be 1,5 or 10.")
             raise HTTPException(status_code=400, detail=f"Invalid count parameter: {count}. Must be 5 or 10.")
 
@@ -252,6 +270,10 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
         user_doc = await user_ref.get()
         if not user_doc.exists:
             raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get user data
+        user_data = user_doc.to_dict()
+        user_points_balance = user_data.get('pointsBalance', 0)
 
         # Construct the reference to the pack document
         pack_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(pack_id)
@@ -266,9 +288,22 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
         pack_data = pack_snap.to_dict()
         cards_map = pack_data.get('cards', {})
 
+        # Check if user has enough points to draw the requested number of cards
+        pack_price = pack_data.get('price', 0)
+        total_price = pack_price * count
+
+        if user_points_balance < total_price:
+            logger.error(
+                f"User '{user_id}' has insufficient points balance ({user_points_balance}) to draw {count} cards (cost: {total_price})")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient points balance. You have {user_points_balance} points, but need {total_price} points to draw {count} cards."
+            )
+
         if not cards_map:
             logger.error(f"No cards found in pack '{pack_id}' in collection '{collection_id}'")
-            raise HTTPException(status_code=404, detail=f"No cards found in pack '{pack_id}' in collection '{collection_id}'")
+            raise HTTPException(status_code=404,
+                                detail=f"No cards found in pack '{pack_id}' in collection '{collection_id}'")
 
         # Get all probabilities from the cards map
         card_ids = list(cards_map.keys())
@@ -276,12 +311,80 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
 
         # Check if there are enough cards in the pack
         if len(card_ids) < count:
-            logger.warning(f"Not enough cards in pack '{pack_id}' in collection '{collection_id}'. Requested {count} but only {len(card_ids)} available.")
+            logger.warning(
+                f"Not enough cards in pack '{pack_id}' in collection '{collection_id}'. Requested {count} but only {len(card_ids)} available.")
             # We'll still draw as many as possible, but with replacement
 
-        # Randomly choose multiple card ids based on probabilities (with replacement)
+        # 3. Firestore transaction to get clientSeed and starting nonce
+        user_doc_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+
+        # Variables to store the values outside the transaction
+        client_seed = None
+        nonce = None
+
+        # Get user data first, outside the transaction
+        user_snap = await user_doc_ref.get()
+        user_data = user_snap.to_dict()
+        client_seed = user_data.get('clientSeed')
+        old_nonce = user_data.get('nonceCounter', 0)
+        nonce = old_nonce + 1
+
+        # Update counter in a transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            tx.update(user_doc_ref, {'nonceCounter': firestore.Increment(count)})
+
+        # Execute the transaction
+        txn = db_client.transaction()
+        await _txn(txn)
+        logger.info(f"Retrieved client seed '{client_seed}' and nonce {nonce} for user '{user_id}'")
+
+        # 4. Provably fair seeds and proof
+        server_seed = secrets.token_hex(32)
+        server_seed_hash = hashlib.sha256(server_seed.encode()).hexdigest()
+        # Compute HMAC for the batch
+        payload = f"{client_seed}{nonce}".encode()
+        random_hash = hmac.new(server_seed.encode(), payload, hashlib.sha256).hexdigest()
+        logger.info(
+            f"Generated server seed '{server_seed}' with hash '{server_seed_hash}' and random hash '{random_hash}'")
+
+        # 5. Perform deterministic draw using Python RNG seeded by random_hash
+        random.seed(int(random_hash, 16))
         chosen_card_ids = random.choices(card_ids, weights=probabilities, k=count)
-        logger.info(f"Randomly selected {count} cards from pack '{pack_id}' in collection '{collection_id}'")
+        logger.info(f"Deterministically selected {count} cards from pack '{pack_id}' in collection '{collection_id}'")
+
+        # 6. Insert into SQL tables
+        opening_id = None
+        try:
+            with db_connection() as conn:
+                cursor = conn.cursor()
+                # pack_openings
+                # Create a full pack reference that includes collection_id and pack_id
+                pack_reference = f"packs/{collection_id}/{collection_id}/{pack_id}"
+                cursor.execute(
+                    """
+                    INSERT INTO pack_openings (user_id, pack_type, pack_count, price_points,
+                                               client_seed, nonce, server_seed_hash, server_seed, random_hash)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+                    """,
+                    (user_id, pack_reference, count, total_price,
+                     client_seed, nonce, server_seed_hash, server_seed, random_hash)
+                )
+                opening_id = cursor.fetchone()[0]
+
+                # transactions
+                cursor.execute(
+                    """
+                    INSERT INTO transactions (user_id, type, points_delta, reference_id)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (user_id, 'pack_open', -total_price, str(opening_id))
+                )
+                conn.commit()
+                logger.info(f"Inserted pack opening record with ID {opening_id} and transaction record")
+        except Exception as e:
+            logger.error(f"Failed to insert SQL records: {e}")
+            # Continue even if SQL insertion fails
 
         # List to store all drawn cards data for adding to user
         cards_to_add = []
@@ -334,7 +437,8 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
                 })
 
         if not cards_to_add:
-            raise HTTPException(status_code=404, detail=f"No valid cards found in pack '{pack_id}' in collection '{collection_id}'")
+            raise HTTPException(status_code=404,
+                                detail=f"No valid cards found in pack '{pack_id}' in collection '{collection_id}'")
 
         # Helper function to convert Firestore references to strings
         def convert_references_to_strings(data):
@@ -411,20 +515,28 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
         # Increment the popularity field of the pack by the number of cards drawn
         try:
             await pack_ref.update({"popularity": Increment(len(drawn_cards))})
-            logger.info(f"Incremented popularity for pack '{pack_id}' in collection '{collection_id}' by {len(drawn_cards)}")
+            logger.info(
+                f"Incremented popularity for pack '{pack_id}' in collection '{collection_id}' by {len(drawn_cards)}")
         except Exception as e:
             logger.error(f"Failed to increment popularity for pack '{pack_id}' in collection '{collection_id}': {e}")
             # Continue even if updating popularity fails
 
         # Increment the total_drawn and totalPointsSpent fields in the user's document by the pack price multiplied by the number of cards drawn
+        # Also deduct the points from the user's balance
         try:
-            pack_price = pack_data.get('price', 0)
-            total_price = pack_price * len(drawn_cards)
+            # We already calculated these values earlier
+            # pack_price = pack_data.get('price', 0)
+            # total_price = pack_price * len(drawn_cards)
+
             await user_ref.update({
                 "total_drawn": Increment(total_price),
-                "totalPointsSpent": Increment(total_price)
+                "totalPointsSpent": Increment(total_price),
+                "pointsBalance": Increment(-total_price)  # Deduct points from balance
             })
-            logger.info(f"Incremented total_drawn and totalPointsSpent for user '{user_id}' by pack price ({pack_price}) * number of cards drawn ({len(drawn_cards)}) = {total_price}")
+            logger.info(
+                f"Incremented total_drawn and totalPointsSpent for user '{user_id}' by pack price ({pack_price}) * number of cards drawn ({len(drawn_cards)}) = {total_price}")
+            logger.info(
+                f"Deducted {total_price} points from user '{user_id}' balance. New balance: {user_points_balance - total_price}")
 
             # Update weekly_spent collection
             try:
@@ -434,7 +546,8 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
                 week_id = start_of_week.strftime("%Y-%m-%d")
 
                 # Reference to the weekly_spent collection and this week's document
-                weekly_spent_ref = db_client.collection('weekly_spent').document('weekly_spent').collection(week_id).document(user_id)
+                weekly_spent_ref = db_client.collection('weekly_spent').document('weekly_spent').collection(
+                    week_id).document(user_id)
                 weekly_doc = await weekly_spent_ref.get()
 
                 if weekly_doc.exists:
@@ -457,12 +570,27 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
             logger.error(f"Failed to increment total_drawn and totalPointsSpent for user '{user_id}': {e}")
             # Continue even if updating total_drawn and totalPointsSpent fails
 
+        # Add provably fair information to the response
+        provably_fair_info = {
+            "server_seed_hash": server_seed_hash,
+            "client_seed": client_seed,
+            "nonce": nonce,
+            "opening_id": opening_id
+        }
+
+        # Add provably fair info to each card
+        for card in drawn_cards:
+            card["provably_fair_info"] = provably_fair_info
+
         return drawn_cards
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error drawing multiple cards from pack '{pack_id}' in collection '{collection_id}' for user '{user_id}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to draw multiple cards from pack '{pack_id}' in collection '{collection_id}': {str(e)}")
+        logger.error(
+            f"Error drawing multiple cards from pack '{pack_id}' in collection '{collection_id}' for user '{user_id}': {e}",
+            exc_info=True)
+        raise HTTPException(status_code=500,
+                            detail=f"Failed to draw multiple cards from pack '{pack_id}' in collection '{collection_id}': {str(e)}")
 
 async def get_user_cards(
     user_id: str, 
@@ -1149,6 +1277,49 @@ async def add_points_to_user(user_id: str, points: int, db_client: AsyncClient) 
         logger.error(f"Error adding points to user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to add points to user: {str(e)}")
 
+async def update_seed(user_id: str, db_client: AsyncClient) -> User:
+    """
+    Update a user's clientSeed with a new random value.
+
+    Args:
+        user_id: The ID of the user to update
+        db_client: Firestore client
+
+    Returns:
+        The updated User object
+
+    Raises:
+        HTTPException: If there's an error updating the user
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Generate a new clientSeed
+        new_seed = secrets.token_hex(16)
+
+        # Update the user's clientSeed
+        await user_ref.update({
+            "clientSeed": new_seed
+        })
+
+        # Get the updated user data
+        updated_user_doc = await user_ref.get()
+        updated_user_data = updated_user_doc.to_dict()
+        updated_user = User(**updated_user_data)
+
+        logger.info(f"Updated clientSeed for user {user_id}")
+        return updated_user
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating clientSeed for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update clientSeed: {str(e)}")
+
 async def create_account(request: CreateAccountRequest, db_client: AsyncClient, user_id: Optional[str] = None) -> User:
     """
     Create a new user account with the specified fields and default values.
@@ -1193,6 +1364,9 @@ async def create_account(request: CreateAccountRequest, db_client: AsyncClient, 
         # Convert Address objects to dictionaries for Firestore
         addresses = [address.model_dump() for address in request.addresses]
 
+        # Generate clientSeed
+        clientSeed = secrets.token_hex(16)
+
         # Create user data
         user_data = {
             "createdAt": now,
@@ -1204,12 +1378,28 @@ async def create_account(request: CreateAccountRequest, db_client: AsyncClient, 
             "pointsBalance": 0,
             "totalCashRecharged": 0,
             "totalPointsSpent": 0,
-            "totalFusion": request.totalFusion
+            "totalFusion": request.totalFusion,
+            "clientSeed": clientSeed
         }
 
         # Create user document in Firestore
         user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
         await user_ref.set(user_data)
+
+        # Generate a random 6-8 character referral code (including numbers and letters)
+        code_length = random.randint(6, 8)
+        refer_code = ''.join(random.choices('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', k=code_length))
+
+        # Create a document in the refer_codes collection with the referral code as the document ID
+        refer_code_data = {
+            "user": user_id,
+            "referer_id": user_id
+        }
+
+        # Create refer_codes document in Firestore
+        refer_code_ref = db_client.collection('refer_codes').document(refer_code)
+        await refer_code_ref.set(refer_code_data)
+        logger.info(f"Created referral code {refer_code} for user {user_id}")
 
         # Get the created user
         user_doc = await user_ref.get()
@@ -1607,9 +1797,6 @@ async def perform_random_fusion(
         result_card_ref = user_ref.collection('cards').document('cards').collection(collection_name).document(result_card_id)
         result_card_doc = await result_card_ref.get()
 
-        # Increment the user's totalFusion counter
-        await user_ref.update({"totalFusion": firestore.Increment(1)})
-
         if not result_card_doc.exists:
             # This shouldn't happen, but just in case
             return PerformFusionResponse(
@@ -1884,6 +2071,141 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
     except Exception as e:
         logger.error(f"Error creating withdraw request for multiple cards for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create withdraw request: {str(e)}")
+
+async def add_card_to_highlights(
+    user_id: str,
+    card_collection_id: str,
+    card_id: str,
+    db_client: AsyncClient
+) -> UserCard:
+    """
+    Add a card to the user's highlights subcollection.
+    This function finds the card in the user's collection and adds it to the highlights subcollection.
+
+    Args:
+        user_id: The ID of the user who owns the card
+        card_collection_id: The collection ID of the card (e.g., 'pokemon')
+        card_id: The ID of the card to add to highlights
+        db_client: Firestore client
+
+    Returns:
+        The card that was added to highlights as a UserCard object
+
+    Raises:
+        HTTPException: If there's an error adding the card to highlights
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the card from the source collection
+        source_card_ref = user_ref.collection('cards').document('cards').collection(card_collection_id).document(card_id)
+        source_card_doc = await source_card_ref.get()
+
+        if not source_card_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found in collection {card_collection_id}")
+
+        # Get the card data
+        source_card_data = source_card_doc.to_dict()
+
+        # Set up the highlights subcollection reference
+        highlights_ref = user_ref.collection('highlights').document(card_id)
+
+        # Check if the card already exists in highlights
+        highlights_doc = await highlights_ref.get()
+
+        if highlights_doc.exists:
+            # Card already exists in highlights, just return it
+            highlights_data = highlights_doc.to_dict()
+
+            # Generate signed URL for the card image
+            if 'image_url' in highlights_data and highlights_data['image_url']:
+                try:
+                    highlights_data['image_url'] = await generate_signed_url(highlights_data['image_url'])
+                except Exception as sign_error:
+                    logger.error(f"Failed to generate signed URL for {highlights_data['image_url']}: {sign_error}")
+                    # Keep the original URL if signing fails
+
+            return UserCard(**highlights_data)
+
+        # Add the card to the highlights subcollection
+        await highlights_ref.set(source_card_data)
+
+        logger.info(f"Added card {card_id} from collection {card_collection_id} to highlights for user {user_id}")
+
+        # Generate signed URL for the card image
+        if 'image_url' in source_card_data and source_card_data['image_url']:
+            try:
+                source_card_data['image_url'] = await generate_signed_url(source_card_data['image_url'])
+            except Exception as sign_error:
+                logger.error(f"Failed to generate signed URL for {source_card_data['image_url']}: {sign_error}")
+                # Keep the original URL if signing fails
+
+        # Return the card that was added to highlights
+        return UserCard(**source_card_data)
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error adding card {card_id} from collection {card_collection_id} to highlights for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add card to highlights: {str(e)}")
+
+async def delete_card_from_highlights(
+    user_id: str,
+    card_id: str,
+    db_client: AsyncClient
+) -> dict:
+    """
+    Delete a card from the user's highlights collection.
+
+    Args:
+        user_id: The ID of the user who owns the card
+        card_id: The ID of the card to delete from highlights
+        db_client: Firestore client
+
+    Returns:
+        A dictionary with a success message
+
+    Raises:
+        HTTPException: If there's an error deleting the card from highlights
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Set up the highlights reference
+        highlights_ref = user_ref.collection('highlights').document(card_id)
+
+        # Check if the card exists in highlights
+        highlights_doc = await highlights_ref.get()
+
+        if not highlights_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found in highlights")
+
+        # Get the card data before deleting it (for logging or returning)
+        highlights_data = highlights_doc.to_dict()
+
+        # Delete the card from highlights
+        await highlights_ref.delete()
+
+        logger.info(f"Deleted card {card_id} from highlights for user {user_id}")
+
+        # Return a success message
+        return {"message": f"Card {card_id} successfully deleted from highlights for user {user_id}"}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deleting card {card_id} from highlights for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete card from highlights: {str(e)}")
 
 async def withdraw_ship_card(user_id: str, card_id: str, subcollection_name: str, db_client: AsyncClient, quantity: int = 1) -> UserCard:
     """
@@ -3593,3 +3915,98 @@ async def offer_cash(
     except Exception as e:
         logger.error(f"Error offering cash for listing {listing_id} by user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to offer cash for listing: {str(e)}")
+
+async def get_weekly_spending_rank(db_client: AsyncClient, week_id: Optional[str] = None, limit: int = 100) -> List[RankEntry]:
+    """
+    Get the top users by weekly spending for a specific week.
+
+    Args:
+        db_client: Firestore async client
+        week_id: The week ID in the format 'YYYY-MM-DD' (default: current week)
+        limit: The maximum number of users to return (default: 100)
+
+    Returns:
+        List[RankEntry]: A list of RankEntry objects containing user_id and spent amount
+
+    Raises:
+        HTTPException: If there's an error getting the weekly spending rank
+    """
+    try:
+        # If week_id is not provided, calculate the current week's ID
+        if not week_id:
+            today = datetime.now()
+            start_of_week = today - timedelta(days=today.weekday())
+            week_id = start_of_week.strftime("%Y-%m-%d")
+
+        # Reference to the weekly_spent collection for the specified week
+        weekly_spent_ref = db_client.collection('weekly_spent').document('weekly_spent').collection(week_id)
+
+        # Query the collection, order by 'spent' in descending order, and limit to the specified number
+        query = weekly_spent_ref.order_by('spent', direction=firestore.Query.DESCENDING).limit(limit)
+
+        # Execute the query
+        docs = await query.get()
+
+        # Convert the documents to RankEntry objects
+        result = []
+        for doc in docs:
+            data = doc.to_dict()
+            spent = data.get('spent', 0)
+            result.append(RankEntry(user_id=doc.id, spent=spent))
+
+        return result
+    except Exception as e:
+        logger.error(f"Error getting weekly spending rank for week {week_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get weekly spending rank: {str(e)}")
+
+
+async def update_user_avatar(user_id: str, avatar: bytes, content_type: str, db_client: AsyncClient) -> User:
+    """
+    Update a user's avatar.
+
+    Args:
+        user_id: The ID of the user to update
+        avatar: Binary image data for user's avatar
+        content_type: The content type of the image (e.g., "image/jpeg")
+        db_client: Firestore client
+
+    Returns:
+        The updated User object
+
+    Raises:
+        HTTPException: If there's an error updating the user
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Handle avatar upload
+        try:
+            # Upload avatar to GCS
+            avatar_gcs_uri = await upload_avatar_to_gcs(avatar, user_id, content_type)
+
+            # Update the user's avatar field
+            await user_ref.update({"avatar": avatar_gcs_uri})
+        except HTTPException as e:
+            # Re-raise the exception from upload_avatar_to_gcs
+            raise e
+        except Exception as e:
+            logger.error(f"Error uploading avatar for user {user_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to upload avatar: {str(e)}")
+
+        # Get the updated user data
+        updated_user_doc = await user_ref.get()
+        updated_user_data = updated_user_doc.to_dict()
+        updated_user = User(**updated_user_data)
+
+        logger.info(f"Updated avatar for user {user_id}")
+        return updated_user
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating avatar for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update avatar: {str(e)}")

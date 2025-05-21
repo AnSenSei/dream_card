@@ -10,6 +10,7 @@ from uuid import uuid4
 from models.schemas import StoredCardInfo, PaginationInfo, AppliedFilters, CardListResponse, CollectionMetadata
 from config import get_logger, settings, get_storage_client, get_firestore_client
 from utils.gcs_utils import generate_signed_url # Import the utility function
+from datetime import datetime
 
 # New imports
 import math
@@ -144,26 +145,28 @@ async def process_new_card_submission(
     card_name: str,
     rarity: str,
     point_worth: int,
-    date_got_in_stock: str,
+    collection_metadata_id: str,
     quantity: int = 0,
-    collection_metadata_id: str | None = None
+    condition: str = "new"
 ) -> StoredCardInfo:
     """
     Orchestrates uploading the image to GCS and then saving the card data to Firestore.
     The card's name will be used as its document ID. Checks for pre-existing card name.
-    If collection_metadata_id is provided, it gets the collection metadata and uses
-    the firestoreCollection and storagePrefix from it. Otherwise defaults
-    to settings.firestore_collection_cards.
+    It gets the collection metadata using collection_metadata_id and uses
+    the firestoreCollection and storagePrefix from it.
 
-    If collection_metadata_id is provided, it will look up the metadata for that collection
-    in the metadata collection and use the storagePrefix for the image path and
-    the firestoreCollection for the Firestore collection.
+    It will look up the metadata for that collection in the metadata collection
+    and use the storagePrefix for the image path and the firestoreCollection
+    for the Firestore collection.
     """
     if not image_file.filename:
         raise HTTPException(status_code=400, detail="Image file name is missing.")
 
     if not card_name or not card_name.strip():
         raise HTTPException(status_code=400, detail="Card name cannot be empty.")
+
+    if not collection_metadata_id or not collection_metadata_id.strip():
+        raise HTTPException(status_code=400, detail="Collection metadata ID cannot be empty.")
 
     # Sanitize card_name slightly for use as document ID (e.g., replace slashes if necessary)
     # For now, we'll assume card_name is valid or Firestore handles it.
@@ -173,36 +176,32 @@ async def process_new_card_submission(
     # Let's proceed with using card_name directly as ID, assuming it's valid.
 
     try:
-        # If collection_metadata_id is provided, look up the metadata for that collection
-        effective_collection_name = settings.firestore_collection_cards
-        storage_prefix = "cards"
+        # Look up the metadata for the collection
+        effective_collection_name = settings.firestore_collection_cards  # Default collection name
+        storage_prefix = "cards"  # Default storage prefix
         logger.info(f"Default storage_prefix set to: '{storage_prefix}'")
 
         logger.info(f"Collection metadata ID received: '{collection_metadata_id}'")
 
-        # Handle both None and empty string cases
-        if collection_metadata_id and collection_metadata_id.strip():
-            try:
-                # Try to get the metadata for the collection
-                logger.info(f"Looking up metadata for collection: '{collection_metadata_id}'")
-                metadata = await get_collection_metadata(collection_metadata_id)
+        try:
+            # Try to get the metadata for the collection
+            logger.info(f"Looking up metadata for collection: '{collection_metadata_id}'")
+            metadata = await get_collection_metadata(collection_metadata_id)
 
-                effective_collection_name = metadata.firestoreCollection
-                storage_prefix = metadata.storagePrefix
-                logger.info(f"Using metadata for collection '{collection_metadata_id}': firestoreCollection='{effective_collection_name}', storagePrefix='{storage_prefix}'")
-            except HTTPException as e:
-                if e.status_code == 404:
-                    # If metadata not found, use the provided collection_metadata_id as is
-                    logger.warning(f"Metadata for collection '{collection_metadata_id}' not found. Using provided collection_metadata_id as is.")
-                    effective_collection_name = collection_metadata_id
-                    # Keep the default storage_prefix as "cards"
-                    logger.warning(f"Keeping default storage_prefix as '{storage_prefix}'")
-                else:
-                    # For other HTTP exceptions, re-raise
-                    logger.error(f"Error retrieving collection metadata: {e.detail}")
-                    raise e
-        else:
-            logger.warning(f"No collection metadata ID provided or it was empty. Using default collection: '{effective_collection_name}'")
+            effective_collection_name = metadata.firestoreCollection
+            storage_prefix = metadata.storagePrefix
+            logger.info(f"Using metadata for collection '{collection_metadata_id}': firestoreCollection='{effective_collection_name}', storagePrefix='{storage_prefix}'")
+        except HTTPException as e:
+            if e.status_code == 404:
+                # If metadata not found, use the provided collection_metadata_id as is
+                logger.warning(f"Metadata for collection '{collection_metadata_id}' not found. Using provided collection_metadata_id as is.")
+                effective_collection_name = collection_metadata_id
+                # Keep the default storage_prefix as "cards"
+                logger.warning(f"Keeping default storage_prefix as '{storage_prefix}'")
+            else:
+                # For other HTTP exceptions, re-raise
+                logger.error(f"Error retrieving collection metadata: {e.detail}")
+                raise e
 
         file_extension = os.path.splitext(image_file.filename)[1]
         # Use the storage_prefix from the collection metadata for the path
@@ -234,14 +233,18 @@ async def process_new_card_submission(
             logger.warning(f"Failed to generate signed URL for {image_url}: {sign_error}")
             signed_image_url = image_url  # Fall back to original URL
 
+        # Format the date as "Month Day, Year"
+        current_date = datetime.now().strftime("%b %d, %Y")
+
         card_data = StoredCardInfo(
             id=card_name,  # Use card_name as the ID for the StoredCardInfo model
             card_name=card_name,
             rarity=rarity,
             point_worth=point_worth,
-            date_got_in_stock=date_got_in_stock,
+            date_got_in_stock=current_date,  # Use today's date automatically
             image_url=signed_image_url,  # Use the signed URL if available
-            quantity=quantity
+            quantity=quantity,
+            condition=condition
         )
 
         # save_card_information will now use card_data.card_name for doc ID and check existence
@@ -260,21 +263,24 @@ async def process_new_card_submission_with_collection_name(
     card_name: str,
     rarity: str,
     point_worth: int,
-    date_got_in_stock: str,
+    collection_name: str,
+    date_got_in_stock: str = None,  # Kept for backward compatibility but not used
     quantity: int = 0,
-    collection_name: str | None = None
+    condition: str = "new"
 ) -> StoredCardInfo:
     """
     Backward compatibility wrapper for process_new_card_submission.
     Uses collection_name as collection_metadata_id.
+    The date_got_in_stock parameter is kept for backward compatibility but not used.
+    The collection_name parameter is required.
     """
     return await process_new_card_submission(
         image_file=image_file,
         card_name=card_name,
         rarity=rarity,
         point_worth=point_worth,
-        date_got_in_stock=date_got_in_stock,
         quantity=quantity,
+        condition=condition,
         collection_metadata_id=collection_name
     )
 
@@ -825,6 +831,101 @@ async def get_all_collections() -> List[CollectionMetadata]:
     Returns metadata for all collections from the metadata collection.
     """
     return await get_all_collection_metadata()
+
+async def add_to_official_listing(collection_id: str, card_id: str, quantity: int = 1, pricePoints: int = 0, priceCash: int = 0) -> dict:
+    """
+    Adds a card to the official_listing collection.
+    Creates a new collection called "official_listing" if it doesn't exist.
+    Adds a subcollection with the provided collection_id.
+    Adds the card under that subcollection using the actual card data.
+
+    Also updates the original card in Firestore:
+    - Creates/increments a new field called quantity_in_offical_marketplace
+    - Decreases the quantity field by the specified quantity
+
+    Uses collection_id directly with get_card_by_id to get the card information.
+
+    Args:
+        collection_id: The ID of the collection the card belongs to
+        card_id: The ID of the card to add to the official listing
+        quantity: The quantity of cards to add to the official listing (default: 1)
+        pricePoints: The price in points for the card in the official listing (default: 0)
+        priceCash: The price in cash for the card in the official listing (default: 0)
+
+    Returns:
+        dict: The data of the added card
+
+    Raises:
+        HTTPException: 404 if card not found, 500 for other errors
+    """
+    firestore_client = get_firestore_client()
+
+    try:
+        # Get the card data from the original collection using collection_id directly
+        card = await get_card_by_id(card_id, collection_id)
+
+        # Get the effective collection name for updating the original card
+        if not collection_id:
+            effective_collection_name = settings.firestore_collection_cards
+        else:
+            try:
+                metadata = await get_collection_metadata(collection_id)
+                effective_collection_name = metadata.firestoreCollection
+            except HTTPException as e:
+                if e.status_code == 404:
+                    effective_collection_name = collection_id
+                else:
+                    raise e
+
+        # Get a reference to the original card document
+        original_card_ref = firestore_client.collection(effective_collection_name).document(card_id)
+
+        # Get the current card data
+        original_card_doc = await original_card_ref.get()
+        if not original_card_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found")
+
+        original_card_data = original_card_doc.to_dict()
+
+        # Update the original card:
+        # 1. Add/increment quantity_in_offical_marketplace by the specified quantity
+        # 2. Decrease quantity by the specified quantity
+        current_quantity = original_card_data.get('quantity', 0)
+        current_marketplace_quantity = original_card_data.get('quantity_in_offical_marketplace', 0)
+
+        if current_quantity < quantity:
+            raise HTTPException(status_code=400, detail=f"Card quantity ({current_quantity}) is less than requested quantity ({quantity}), cannot add to marketplace")
+
+        # Update the original card
+        await original_card_ref.update({
+            'quantity': max(0, current_quantity - quantity),
+            'quantity_in_offical_marketplace': current_marketplace_quantity + quantity
+        })
+
+        # Convert the card model to a dictionary for Firestore
+        card_dict = card.model_dump()
+
+        # Add the pricePoints and priceCash fields to the card_dict
+        card_dict['pricePoints'] = pricePoints
+        card_dict['priceCash'] = priceCash
+        card_dict['quantity'] = quantity  # Set the quantity to the specified quantity
+
+        # Add the card to the official_listing collection
+        # Path: official_listing/{collection_id}/{card_id}
+        doc_ref = firestore_client.collection("official_listing").document(collection_id).collection("cards").document(card_id)
+
+        await doc_ref.set(card_dict)
+
+        logger.info(f"Added card {card_id} from collection {collection_id} to official listing with quantity {quantity}, pricePoints {pricePoints}, and priceCash {priceCash}")
+        logger.info(f"Updated original card: decreased quantity by {quantity}, increased quantity_in_offical_marketplace by {quantity}")
+
+        return card_dict
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error adding card {card_id} from collection {collection_id} to official_listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not add card to official listing: {str(e)}")
 
 async def get_card_by_id(document_id: str, collection_name: str | None = None) -> StoredCardInfo:
     """

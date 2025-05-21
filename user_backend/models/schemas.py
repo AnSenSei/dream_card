@@ -32,6 +32,7 @@ class User(BaseModel):
     totalCashRecharged: int = 0
     totalPointsSpent: int = 0
     totalFusion: int = 0  # Added new field
+    clientSeed: Optional[str] = None  # Client seed for randomization
 
     class Config:
         from_attributes = True
@@ -213,3 +214,17 @@ class UserListResponse(BaseModel):
     """Response model for listing users"""
     items: List[User]
     pagination: PaginationInfo
+
+class RankEntry(BaseModel):
+    """
+    Represents a user's rank entry based on their weekly spending.
+    The format is "user_id:spent" where spent is the amount spent by the user.
+    """
+    user_id: str
+    spent: int
+
+    def __str__(self) -> str:
+        return f"{self.user_id}:{self.spent}"
+
+# Note: For file uploads, we don't use a Pydantic model
+# The avatar upload endpoint will use FastAPI's File and UploadFile directly

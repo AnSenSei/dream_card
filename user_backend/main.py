@@ -6,8 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from config import get_logger, instrument_app, settings
-from router import account_router, card_router, marketplace_router
+from config import get_logger, instrument_app, settings, test_connection, close_connector
+from router import account_router, card_router, marketplace_router, rank_router
 
 # Configure logging with structured logger
 logger = get_logger("main")
@@ -19,6 +19,24 @@ API_VERSION = "v1"
 
 # Main application instance
 app = FastAPI(title=f"{SERVICE_TITLE} - Main Gateway")
+
+# Add database connection test to startup event
+@app.on_event("startup")
+async def startup_db_client():
+    """Initialize database connection on startup"""
+    logger.info("Testing database connection...")
+    if test_connection():
+        logger.info("Database connection successful")
+    else:
+        logger.warning("Failed to establish database connection")
+
+# Add database connection cleanup to shutdown event
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    """Close database connections on shutdown"""
+    logger.info("Closing database connections...")
+    close_connector()
+    logger.info("Database connections closed")
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,6 +87,9 @@ logger.info("Card router included in the sub-API.")
 
 api_v1.include_router(marketplace_router.router)
 logger.info("Marketplace router included in the sub-API.")
+
+api_v1.include_router(rank_router.router)
+logger.info("Rank router included in the sub-API.")
 
 # Mount the sub-API (api_v1) under the main app (app)
 app.mount(f"/{SERVICE_PATH}/api/{API_VERSION}", api_v1)
