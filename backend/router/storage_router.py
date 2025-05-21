@@ -29,10 +29,11 @@ async def upload_card_endpoint(
     card_name: Annotated[str, Form()],
     rarity: Annotated[str, Form()],
     point_worth: Annotated[int, Form()],
-    date_got_in_stock: Annotated[str, Form()],
+    collection_metadata_id: Annotated[str, Form()],  # IMPORTANT: Must be sent as form data, not URL parameter
     quantity: Annotated[int, Form()] = 0,
-    collection_metadata_id: str | None = Form(None),  # IMPORTANT: Must be sent as form data, not URL parameter
+    condition: Annotated[str, Form()] = "mint",
     # Keep for backward compatibility, also as Form param
+    date_got_in_stock: Annotated[str, Form()] = None,  # Kept for backward compatibility but not used
 ):
     """
     Endpoint to upload a card image and its information.
@@ -40,27 +41,20 @@ async def upload_card_endpoint(
     - **card_name**: Name of the card.
     - **rarity**: Rarity of the card.
     - **point_worth**: How many points the card is worth.
-    - **date_got_in_stock**: Date the card was acquired.
-    - **quantity**: Number of cards in stock (defaults to 0).
-    - **collection_metadata_id** (FORM FIELD, optional): The ID of the collection metadata to use. 
+    - **collection_metadata_id** (FORM FIELD, required): The ID of the collection metadata to use. 
        MUST be submitted as a form field, not as a URL parameter.
-    
+    - **quantity**: Number of cards in stock (defaults to 0).
+    - **condition**: Condition of the card (defaults to "mint").
+    - **date_got_in_stock** (optional): Kept for backward compatibility but not used. Today's date is used automatically.
+
     NOTE: When adding cards to a collection via admin_frontend, ensure collection_metadata_id is included in the form data.
     """
 
-    effective_collection_metadata_id = collection_metadata_id
+    logger.info(f"Received request to upload card: {card_name}. Collection metadata ID: {collection_metadata_id}")
 
-    logger.info(f"Received request to upload card: {card_name}. Collection metadata ID: {effective_collection_metadata_id if effective_collection_metadata_id else 'default'}")
-
-    
     # Debug all request form fields
     logger.info(f"Form field collection_metadata_id: {collection_metadata_id!r}")
     logger.info(f"Form field collection_metadata_id type: {type(collection_metadata_id)}")
-    
-    # Validate that at least one collection parameter has a value if using custom collections
-    if effective_collection_metadata_id is not None and not effective_collection_metadata_id.strip():
-        logger.warning("Received empty collection_metadata_id or collectionName. Will use default collection.")
-        effective_collection_metadata_id = None
     try:
         # The process_new_card_submission function in the service layer will handle
         # uploading the image and then creating the StoredCardInfo object (including image_url).
@@ -69,9 +63,9 @@ async def upload_card_endpoint(
             card_name=card_name,
             rarity=rarity,
             point_worth=point_worth,
-            date_got_in_stock=date_got_in_stock,
+            collection_metadata_id=collection_metadata_id,
             quantity=quantity,
-            collection_metadata_id=effective_collection_metadata_id
+            condition=condition
         )
         return stored_card
     except HTTPException as e:

@@ -6,6 +6,7 @@ from google.cloud import firestore, storage # firestore.ArrayUnion and firestore
 
 from config import get_logger
 from models.pack_schema import AddPackRequest, CardPack, AddCardToPackRequest
+from models.schemas import StoredCardInfo
 from utils.gcs_utils import generate_signed_url
 
 from google.cloud.firestore_v1 import AsyncClient, ArrayUnion, ArrayRemove, Increment
@@ -55,8 +56,11 @@ async def create_pack_in_firestore(
 
     pack_name = pack_data.pack_name
     collection_id = pack_data.collection_id
+    price = pack_data.price
     win_rate = pack_data.win_rate
+    max_win = pack_data.max_win
     is_active = pack_data.is_active
+    popularity = pack_data.popularity
 
     if not pack_name:
         raise HTTPException(status_code=400, detail="Pack name cannot be empty.")
@@ -124,8 +128,11 @@ async def create_pack_in_firestore(
             "name": pack_name,
             "id": pack_id,
             "created_at": firestore.SERVER_TIMESTAMP,
+            "price": price,
             "win_rate": win_rate,
+            "max_win": max_win,
             "is_active": is_active,
+            "popularity": popularity,
         }
         if image_gcs_uri_for_firestore:
             pack_doc_data["image_url"] = image_gcs_uri_for_firestore
@@ -179,7 +186,10 @@ async def get_all_packs_from_firestore(db_client: firestore.AsyncClient) -> List
                 image_url=signed_image_url, # Use signed URL
                 description=pack_data.get('description'), 
                 rarity_probabilities=pack_data.get('rarity_probabilities'), 
-                cards_by_rarity=pack_data.get('cards_by_rarity') 
+                cards_by_rarity=pack_data.get('cards_by_rarity'),
+                win_rate=pack_data.get('win_rate'),
+                max_win=pack_data.get('max_win'),
+                popularity=pack_data.get('popularity', 0)
                 # rarity_configurations is intentionally omitted here as per user request
             ))
         logger.info(f"Successfully fetched {len(packs_list)} packs from Firestore.")
@@ -239,7 +249,9 @@ async def get_packs_collection_from_firestore(collection_id: str, db_client: fir
                 id=pack_id,
                 name=pack_name,
                 image_url=signed_image_url,
-                win_rate=pack_data.get('win_rate')
+                win_rate=pack_data.get('win_rate'),
+                max_win=pack_data.get('max_win'),
+                popularity=pack_data.get('popularity', 0)
             )
             packs_list.append(pack)
 
@@ -360,6 +372,9 @@ async def _process_pack_document(doc_snapshot, db_client, collection_id):
             description=pack_data.get('description'),
             rarity_probabilities=pack_data.get('rarity_probabilities'),
             cards_by_rarity=pack_data.get('cards_by_rarity'),
+            win_rate=pack_data.get('win_rate'),
+            max_win=pack_data.get('max_win'),
+            popularity=pack_data.get('popularity', 0),
             rarity_configurations=rarity_configurations # Add fetched rarities
         )
     except Exception as e:
@@ -382,6 +397,7 @@ async def add_card_to_pack_rarity(
     - quantity: Card quantity (updated after each draw)
     - point: Card point value (updated after each draw)
     - image_url: URL to the card image
+    - condition: Card condition (e.g., "mint", "near mint", etc.)
     """
     try:
         # Check if pack exists
@@ -405,7 +421,8 @@ async def add_card_to_pack_rarity(
             "name": card_data.name,
             "quantity": card_data.quantity,
             "point": card_data.point,
-            "image_url": card_data.image_url
+            "image_url": card_data.image_url,
+            "condition": getattr(card_data, "condition", "new")  # Default to "mint" if not provided
         }
 
         # Add card to the rarity
@@ -437,6 +454,7 @@ async def add_card_from_storage_to_pack(
     /packs/{packId}/rarities/{rarityId}/cards/{cardId} with fields:
     - globalRef: DocumentReference to the global card
     - name, quantity, point, image_url: copied from the storage card
+    - condition: Card condition (e.g., "mint", "near mint", etc.)
     """
     from service.storage_service import get_card_by_id
 
@@ -475,7 +493,8 @@ async def add_card_from_storage_to_pack(
             "name": card_data.card_name,
             "quantity": card_data.quantity,
             "point": card_data.point_worth,
-            "image_url": card_data.image_url
+            "image_url": card_data.image_url,
+            "condition": getattr(card_data, "condition", "new")  # Default to "mint" if not provided
         }
 
         # Add card to the rarity
@@ -495,7 +514,8 @@ async def add_card_direct_to_pack(
     document_id: str,
     pack_id: str,
     probability: float,
-    db_client: AsyncClient
+    db_client: AsyncClient,
+    condition: str = "mint"
 ) -> bool:
     """
     Adds a card directly to a pack with its own probability.
@@ -507,6 +527,7 @@ async def add_card_direct_to_pack(
         pack_id: The ID of the pack to add the card to (can include collection_id, formatted as 'collection_id/pack_id')
         probability: The probability value for the card (0.0 to 1.0)
         db_client: Firestore client
+        condition: The condition of the card (e.g., "mint", "near mint", etc.)
 
     Returns:
         bool: True if successfully added
@@ -567,11 +588,13 @@ async def add_card_direct_to_pack(
 
         # Prepare card data with probability
         card_doc_data = {
-            "globalRef": global_card_ref,
-            "name": card_info.card_name,
+            "card_reference": global_card_ref,
+            "card_name": card_info.card_name,
             "quantity": card_info.quantity,
-            "point": card_info.point_worth,
-            "probability": probability
+            "point_worth": card_info.point_worth,
+            "rarity": card_info.rarity,
+            "probability": probability,
+            "condition": getattr(card_info, "condition", "new")  # Default to "mint" if not provided
         }
 
         # Add image_url if available
@@ -582,17 +605,16 @@ async def add_card_direct_to_pack(
         card_ref = pack_ref.collection('cards').document(document_id)
         await card_ref.set(card_doc_data)
 
-        # Update the pack document to include this card in its cards array if needed
-        # This is optional and depends on whether you want to maintain a list of cards in the pack document
+        # Update the pack document to include this card in its cards map if needed
+        # This is optional and depends on whether you want to maintain a map of cards in the pack document
         pack_data = pack_snap.to_dict()
-        cards_array = pack_data.get('cards', [])
+        cards_map = pack_data.get('cards', {})
 
-        # Add the card ID to the array if it's not already there
-        if document_id not in cards_array:
-            cards_array.append(document_id)
-            await pack_ref.set({
-                'cards': cards_array
-            }, merge=True)
+        # Add the card ID to the map with its probability
+        cards_map[document_id] = probability
+        await pack_ref.set({
+            'cards': cards_map
+        }, merge=True)
 
         logger.info(f"Successfully added card '{document_id}' directly to pack '{pack_id}' with probability {probability}")
         return True
@@ -656,15 +678,15 @@ async def delete_card_from_pack(
         # Delete the card from the cards subcollection
         await card_ref.delete()
 
-        # Now update the pack document to remove this card from its cards array if it exists
+        # Now update the pack document to remove this card from its cards map if it exists
         pack_data = pack_snap.to_dict()
-        cards_array = pack_data.get('cards', [])
+        cards_map = pack_data.get('cards', {})
 
-        # Remove the card ID from the array if it's there
-        if document_id in cards_array:
-            cards_array.remove(document_id)
+        # Remove the card ID from the map if it's there
+        if document_id in cards_map:
+            del cards_map[document_id]
             await pack_ref.set({
-                'cards': cards_array
+                'cards': cards_map
             }, merge=True)
 
         logger.info(f"Successfully deleted card '{document_id}' from pack '{pack_id}'")
@@ -687,7 +709,7 @@ async def update_pack_in_firestore(
 
     batch = db_client.batch()
 
-    # Handle updates to top-level pack document fields (e.g., name, description)
+    # Handle updates to top-level pack document fields (e.g., name, description, popularity, max_win)
     pack_level_updates = {}
     if "name" in updates: # Client might send None if they want to clear a field (if allowed)
         # Firestore behavior with None: can store as null or might be an issue depending on rules/schema.
@@ -697,6 +719,10 @@ async def update_pack_in_firestore(
         pack_level_updates["name"] = updates["name"]
     if "description" in updates:
         pack_level_updates["description"] = updates["description"]
+    if "popularity" in updates:
+        pack_level_updates["popularity"] = updates["popularity"]
+    if "max_win" in updates:
+        pack_level_updates["max_win"] = updates["max_win"]
 
     if pack_level_updates: # If there are any top-level fields to update
         batch.update(pack_ref, pack_level_updates)
@@ -859,3 +885,85 @@ async def delete_pack_in_firestore(
     except Exception as e:
         logger.error(f"Error deleting pack: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete pack: {str(e)}")
+
+async def get_all_cards_in_pack(
+    collection_id: str,
+    pack_id: str,
+    db_client: AsyncClient,
+    sort_by: str = "point_worth"
+) -> List[StoredCardInfo]:
+    """
+    Retrieves all cards in a pack and sorts them by the specified field in descending order.
+    Default sort is by point_worth in descending order.
+
+    Args:
+        collection_id: The ID of the collection containing the pack
+        pack_id: The ID of the pack to get cards from
+        db_client: Firestore client
+        sort_by: Field to sort by, either "point_worth" (default) or "rarity"
+
+    Returns:
+        List[StoredCardInfo]: List of all cards in the pack, sorted by the specified field in descending order
+
+    Raises:
+        HTTPException: If the pack doesn't exist or there's an error retrieving the cards
+    """
+    try:
+        # Construct the reference to the pack document
+        pack_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(pack_id)
+
+        # Check if pack exists
+        pack_snap = await pack_ref.get()
+        if not pack_snap.exists:
+            logger.error(f"Pack not found: {collection_id}/{pack_id}")
+            raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found in collection '{collection_id}'")
+
+        # Get all cards in the pack's cards subcollection
+        cards_collection = pack_ref.collection('cards')
+        cards = await cards_collection.get()
+
+        # Convert the cards to StoredCardInfo objects
+        card_list = []
+        for card in cards:
+            card_data = card.to_dict()
+            card_data['id'] = card.id  # Add the document ID as the card ID
+
+            # Generate signed URL for the image if it's a GCS URI
+            if 'image_url' in card_data and card_data['image_url'] and card_data['image_url'].startswith('gs://'):
+                try:
+                    from utils.gcs_utils import generate_signed_url
+                    card_data['image_url'] = await generate_signed_url(card_data['image_url'])
+                    logger.debug(f"Generated signed URL for image: {card_data['image_url']}")
+                except Exception as sign_error:
+                    logger.error(f"Failed to generate signed URL for {card_data['image_url']}: {sign_error}")
+                    # Keep the original URL if signing fails
+
+            # Create a StoredCardInfo object from the card data
+            # Map the fields from the card document to the StoredCardInfo model
+            stored_card = StoredCardInfo(
+                id=card.id,
+                card_name=card_data.get('card_name', ''),
+                rarity=card_data.get('rarity', 0),
+                point_worth=card_data.get('point_worth', 0),
+                date_got_in_stock=card_data.get('date_got_in_stock', ''),
+                image_url=card_data.get('image_url', ''),
+                quantity=card_data.get('quantity', 0)
+            )
+            card_list.append(stored_card)
+
+        # Sort the cards by the specified field in descending order
+        if sort_by.lower() == "rarity":
+            card_list.sort(key=lambda x: x.rarity, reverse=True)
+            logger.info(f"Sorting cards by rarity in descending order")
+        else:
+            # Default to point_worth
+            card_list.sort(key=lambda x: x.point_worth, reverse=True)
+            logger.info(f"Sorting cards by point_worth in descending order")
+
+        logger.info(f"Successfully retrieved {len(card_list)} cards from pack '{pack_id}' in collection '{collection_id}'")
+        return card_list
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving cards from pack: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve cards from pack: {str(e)}")

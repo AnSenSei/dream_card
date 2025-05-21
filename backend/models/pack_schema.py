@@ -12,6 +12,8 @@ class CardPack(BaseModel):
     name: str
     image_url: Optional[str] = None
     win_rate: Optional[int] = None
+    max_win: Optional[int] = None
+    popularity: Optional[int] = 0
 
 class AddPackRequest(BaseModel):
     """
@@ -19,8 +21,11 @@ class AddPackRequest(BaseModel):
     """
     pack_name: str
     collection_id: str
+    price: int
     win_rate: Optional[int] = None
+    max_win: Optional[int] = None
     is_active: bool = False
+    popularity: Optional[int] = 0
 
 class CardInPack(BaseModel):
     """
@@ -32,6 +37,7 @@ class CardInPack(BaseModel):
     point: Optional[int] = 0
     image_url: Optional[str] = None
     probability: Optional[float] = 0.0
+    condition: Optional[str] = "new"
 
     class Config:
         arbitrary_types_allowed = True
@@ -45,6 +51,7 @@ class AddCardToPackRequest(BaseModel):
     point: Optional[int] = 0
     image_url: Optional[str] = None
     probability: Optional[float] = 0.0
+    condition: Optional[str] = "new"
 
 class UpdatePackRequest(BaseModel):
     """
@@ -67,6 +74,8 @@ class UpdatePackRequest(BaseModel):
     description: Optional[str] = None
     rarities: Optional[Dict[str, Dict[str, Any]]] = None
     win_rate: Optional[int] = None
+    max_win: Optional[int] = None
+    popularity: Optional[int] = None
 
 
 class AddCardToPackDirectRequest(BaseModel):
@@ -78,10 +87,12 @@ class AddCardToPackDirectRequest(BaseModel):
     - collection_metadata_id: The ID of the collection metadata for fetching card details
     - document_id: The ID of the card to add (card name)
     - probability: The probability value for the card (0.0 to 1.0)
+    - condition: The condition of the card (e.g., "mint", "near mint", etc.)
     """
     collection_metadata_id: str
     document_id: str
     probability: float
+    condition: Optional[str] = "new"
 
 class DeleteCardFromPackRequest(BaseModel):
     """

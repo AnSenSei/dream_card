@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Signup - Firebase Cloud Function</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background-color: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 500px;
+            text-align: center;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 20px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            text-align: left;
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .success {
+            color: green;
+        }
+        .error {
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Test Signup for Firebase Cloud Function</h1>
+        <p>This page will test the cloud function by creating a test user with the following credentials:</p>
+        <p><strong>Email:</strong> qa-user@example.com</p>
+        <p><strong>Password:</strong> SuperSecure123!</p>
+        <button id="test-signup">Run Test Signup</button>
+        <div id="result">Results will appear here...</div>
+    </div>
+
+    <script type="module">
+        // Import Firebase modules
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getAuth, createUserWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+        // Your web app's Firebase configuration
+        // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+        const firebaseConfig = {
+            apiKey: "AIzaSyBfbEQUIGs-0rGMMw2GLFkcq6EvlG4ID40",
+            authDomain: "seventh-program-433718-h8.firebaseapp.com",
+            projectId: "seventh-program-433718-h8",
+            storageBucket: "seventh-program-433718-h8.firebasestorage.app",
+            messagingSenderId: "351785787544",
+            appId: "1:351785787544:web:eeb0ca41aa9ffa0354f0ed",
+            measurementId: "G-X53524FJ7B"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+
+        // Get DOM elements
+        const testSignupButton = document.getElementById('test-signup');
+        const resultDiv = document.getElementById('result');
+
+        // Add event listener to the test signup button
+        testSignupButton.addEventListener('click', async () => {
+            resultDiv.textContent = "Running test signup...";
+            resultDiv.className = "";
+
+            try {
+                // This is the exact code from the issue description
+                const userCred = await createUserWithEmailAndPassword(auth,
+                    "qa-user@example.com",
+                    "SuperSecure123!"
+                );
+
+                resultDiv.textContent = `Signed up successfully!\nUser UID: ${userCred.user.uid}`;
+                resultDiv.className = "success";
+                console.log("Signed up:", userCred.user.uid);
+            } catch (error) {
+                resultDiv.textContent = `Error: ${error.message}`;
+                resultDiv.className = "error";
+                console.error(error);
+            }
+        });
+    </script>
+</body>
+</html>
