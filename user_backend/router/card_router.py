@@ -1,10 +1,10 @@
 from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body
 from typing import Optional, List
 from google.cloud import firestore
+from pydantic import BaseModel
 
 from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse
 from service.user_service import (
-    add_card_to_user,
     add_multiple_cards_to_user,
     draw_card_from_pack,
     draw_multiple_cards_from_pack,
@@ -17,7 +17,9 @@ from service.user_service import (
     get_user_card,
     check_card_missing,
     add_card_to_highlights,
-    delete_card_from_highlights
+    delete_card_from_highlights,
+    add_card_to_user,
+    add_cards_and_deduct_points,
 )
 from config import get_firestore_client, get_logger
 
@@ -79,6 +81,54 @@ async def add_card_to_user_route(
     except Exception as e:
         logger.error(f"Error adding card(s) to user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while adding the card(s)")
+
+class CardWithPointsRequest(BaseModel):
+    """
+    Request model for adding cards to a user's collection while deducting points in a single transaction.
+    """
+    card_references: List[str]
+    points_to_deduct: int
+
+@router.post("/{user_id}/cards_with_points", response_model=dict, status_code=201)
+async def add_cards_with_points_route(
+    user_id: str = Path(...),
+    collection_metadata_id: str = Query(..., description="The ID of the collection metadata to use for the subcollection"),
+    request: CardWithPointsRequest = Body(..., description="Request body containing card references and points to deduct"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Add cards to a user's collection and deduct points in a single atomic transaction.
+
+    This endpoint:
+    1. Takes a list of card_references and points_to_deduct in the request body
+    2. Requires collection_metadata_id as a query parameter
+    3. Deducts the specified points from the user's balance
+    4. Adds the cards to the user's collection
+    5. All operations are performed in a single transaction
+    6. If any operation fails, the entire transaction is rolled back
+
+    Returns:
+        dict: Success message if all operations succeed
+    """
+    try:
+        # Call the service function that handles both operations in a transaction
+        result = await add_cards_and_deduct_points(
+            user_id=user_id,
+            card_references=request.card_references,
+            points_to_deduct=request.points_to_deduct,
+            collection_metadata_id=collection_metadata_id,
+            db_client=db
+        )
+
+        return {
+            "message": f"Successfully added {result['cards_added']} card(s) and deducted {request.points_to_deduct} points for user {user_id}",
+            "result": result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing cards and points transaction for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while processing the transaction")
 
 @router.get("/{user_id}/cards", response_model=UserCardsResponse)
 async def get_user_cards_route(

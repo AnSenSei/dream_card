@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     firestore_collection_cards: str = "pokemon"
     meta_data_collection: str = "collection_meta_data"
     PACKS_BUCKET:str =  "pack_covers"
+    # User backend service configuration
+    user_backend_url: str = "http://localhost:8082/users/api/v1"
     # Add other configurations here, e.g., database URLs, API keys
 
     class Config:

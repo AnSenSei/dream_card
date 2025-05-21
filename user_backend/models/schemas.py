@@ -62,6 +62,17 @@ class UserCard(BaseModel):
     class Config:
         from_attributes = True
 
+class CardReferencesRequest(BaseModel):
+    """Request model for adding cards to a user's collection"""
+    card_references: List[str]
+
+class CardWithPointsRequest(BaseModel):
+    """
+    Request model for adding cards to a user's collection while deducting points in a single transaction.
+    """
+    card_references: List[str]
+    points_to_deduct: int
+
 class AppliedFilters(BaseModel):
     """Filters applied to a card list query"""
     sort_by: str

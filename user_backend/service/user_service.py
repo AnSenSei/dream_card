@@ -858,6 +858,9 @@ async def get_user_subcollection_cards(
         raise HTTPException(status_code=500, detail=f"Failed to get cards from subcollection {subcollection_name}: {str(e)}")
 
 
+
+
+
 async def add_card_to_user(
     user_id: str,
     card_reference: str,
@@ -1023,6 +1026,93 @@ async def add_multiple_cards_to_user(
     # 3. Return a summary message
     success_count = sum(1 for result in results if not result.startswith("Failed"))
     return f"Added {success_count} out of {len(card_references)} cards to user {user_id}"
+
+
+async def add_cards_and_deduct_points(
+    user_id: str,
+    card_references: List[str],
+    points_to_deduct: int,
+    db_client: AsyncClient,
+    collection_metadata_id: str = None
+) -> dict:
+    """
+    Add multiple cards to a user's collection and deduct points in a single atomic transaction.
+
+    Args:
+        user_id: The ID of the user
+        card_references: List of references to master cards (["collection/card_id", ...])
+        points_to_deduct: Number of points to deduct from user's balance
+        db_client: Firestore async client
+        collection_metadata_id: Optional override for subcollection name
+
+    Returns:
+        Dictionary with success message and details
+
+    Raises:
+        HTTPException on errors
+    """
+    logger = get_logger(__name__)
+
+    # 1. Verify user exists and has enough points
+    user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+    user_doc = await user_ref.get()
+    if not user_doc.exists:
+        raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+    user_data = user_doc.to_dict()
+    current_points = user_data.get("pointsBalance", 0)
+
+    if current_points < points_to_deduct:
+        raise HTTPException(status_code=400, 
+                           detail=f"Insufficient points. User has {current_points} points, but {points_to_deduct} are required.")
+
+    # 2. Validate points_to_deduct
+    if points_to_deduct <= 0:
+        raise HTTPException(status_code=400, detail="Points to deduct must be greater than 0")
+
+    # 3. Deduct points from user
+
+    # 4. Add cards to user's collection by calling add_card_to_user for each card
+    results = []
+    for card_reference in card_references:
+        try:
+            result = await add_card_to_user(
+                user_id=user_id,
+                card_reference=card_reference,
+                db_client=db_client,
+                collection_metadata_id=collection_metadata_id
+            )
+            results.append(result)
+        except HTTPException as e:
+            # Log the error but continue processing other cards
+            logger.error(f"Error adding card {card_reference} to user {user_id}: {e.detail}")
+            results.append(f"Failed to add card {card_reference}: {e.detail}")
+        except Exception as e:
+            # Log the error but continue processing other cards
+            logger.error(f"Error adding card {card_reference} to user {user_id}: {str(e)}")
+            results.append(f"Failed to add card {card_reference}: {str(e)}")
+
+    @firestore.async_transactional
+    async def _deduct_points_txn(tx: firestore.AsyncTransaction):
+        tx.update(user_ref, {
+            "pointsBalance": firestore.Increment(-points_to_deduct)
+        })
+
+    # Execute the transaction to deduct points
+    txn = db_client.transaction()
+    await _deduct_points_txn(txn)
+
+    # 5. Get updated user data
+    updated_user_doc = await user_ref.get()
+    updated_user_data = updated_user_doc.to_dict()
+
+    # 6. Return success message with details
+    success_count = sum(1 for result in results if not result.startswith("Failed"))
+    return {
+        "message": f"Successfully added {success_count} card(s) and deducted {points_to_deduct} points",
+        "remaining_points": updated_user_data.get("pointsBalance", 0),
+        "cards_added": success_count
+    }
 
 
 
@@ -2489,30 +2579,30 @@ async def withdraw_listing(
 
         # Check if the card still exists
         card_doc = await card_ref.get()
-        if not card_doc.exists:
-            # If the card doesn't exist anymore, just delete the listing
-            await listing_ref.delete()
-            return {"message": f"Listing {listing_id} withdrawn successfully, but card no longer exists"}
+        if user_card.exists:
+            # Card exists, update quantity
+            user_card_data = user_card.to_dict()
+            current_quantity = user_card_data.get('quantity', 0)
 
-        # Get the current card data
-        card_data = card_doc.to_dict()
-        current_locked_quantity = card_data.get("locked_quantity", 0)
-        current_quantity = card_data.get("quantity", 0)
-
-        # 4. Update the user's card in a transaction
-        @firestore.async_transactional
-        async def _txn(tx: firestore.AsyncTransaction):
-            # Decrease the locked_quantity
-            new_locked_quantity = max(0, current_locked_quantity - listing_quantity)
-
-            # Increase the quantity
-            new_quantity = current_quantity + listing_quantity
-
-            # Update both locked_quantity and quantity
-            tx.update(card_ref, {
-                "locked_quantity": new_locked_quantity,
-                "quantity": new_quantity
+            # Update the card with incremented quantity
+            transaction.update(user_card_ref, {
+                'quantity': current_quantity + 1,
+                # Update expiration dates only if they're newer
+                'expireAt': expireAt if (expireAt and (not user_card_data.get('expireAt') or 
+                                        expireAt > user_card_data.get('expireAt'))) 
+                            else user_card_data.get('expireAt'),
+                'buybackexpiresAt': buybackexpiresAt if (buybackexpiresAt and (not user_card_data.get('buybackexpiresAt') or 
+                                                    buybackexpiresAt > user_card_data.get('buybackexpiresAt'))) 
+                                else user_card_data.get('buybackexpiresAt')
             })
+
+            # Record the updated card details
+            updated_card = {**user_card_data, 'quantity': current_quantity + 1}
+            cards_added.append(updated_card)
+
+        else:
+            # Card doesn't exist, create new entry
+            new
 
             # Delete the listing
             tx.delete(listing_ref)

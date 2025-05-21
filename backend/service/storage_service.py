@@ -839,6 +839,9 @@ async def add_to_official_listing(collection_id: str, card_id: str, quantity: in
     Adds a subcollection with the provided collection_id.
     Adds the card under that subcollection using the actual card data.
 
+    Includes a card_reference field in the format "{effective_collection_name}/{card_id}"
+    that points to the original card in Firestore.
+
     Also updates the original card in Firestore:
     - Creates/increments a new field called quantity_in_offical_marketplace
     - Decreases the quantity field by the specified quantity
@@ -905,10 +908,12 @@ async def add_to_official_listing(collection_id: str, card_id: str, quantity: in
         # Convert the card model to a dictionary for Firestore
         card_dict = card.model_dump()
 
-        # Add the pricePoints and priceCash fields to the card_dict
+        # Add the pricePoints, priceCash, and collection_id fields to the card_dict
         card_dict['pricePoints'] = pricePoints
         card_dict['priceCash'] = priceCash
         card_dict['quantity'] = quantity  # Set the quantity to the specified quantity
+        card_dict['card_reference'] = f"{effective_collection_name}/{card_id}"  # Add card reference
+        card_dict['collection_id'] = collection_id  # Add collection_id field
 
         # Add the card to the official_listing collection
         # Path: official_listing/{collection_id}/{card_id}
@@ -926,6 +931,164 @@ async def add_to_official_listing(collection_id: str, card_id: str, quantity: in
     except Exception as e:
         logger.error(f"Error adding card {card_id} from collection {collection_id} to official_listing: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Could not add card to official listing: {str(e)}")
+
+async def get_all_official_listings(collection_id: str) -> List[dict]:
+    """
+    Retrieves all cards from the official_listing collection for a specific collection.
+
+    Args:
+        collection_id: The ID of the collection to get official listings for
+
+    Returns:
+        List[dict]: A list of card data from the official listing
+
+    Raises:
+        HTTPException: 404 if collection not found, 500 for other errors
+    """
+    firestore_client = get_firestore_client()
+
+    try:
+        # Get a reference to the cards subcollection
+        cards_ref = firestore_client.collection("official_listing").document(collection_id).collection("cards")
+
+        # Get all documents from the cards subcollection
+        cards_stream = cards_ref.stream()
+
+        # Create a list to store the card data
+        cards_list = []
+
+        # Iterate through the documents and add them to the list
+        async for card_doc in cards_stream:
+            card_data = card_doc.to_dict()
+            card_data['id'] = card_doc.id  # Add the document ID to the card data
+
+            # Ensure collection_id is in the card data
+            if 'collection_id' not in card_data:
+                card_data['collection_id'] = collection_id
+
+            # Generate signed URL for the image if it's a GCS URI
+            if 'image_url' in card_data and card_data['image_url'].startswith('gs://'):
+                try:
+                    card_data['image_url'] = await generate_signed_url(card_data['image_url'])
+                    logger.debug(f"Generated signed URL for image: {card_data['image_url']}")
+                except Exception as sign_error:
+                    logger.error(f"Failed to generate signed URL for {card_data['image_url']}: {sign_error}")
+                    # Keep the original URL if signing fails
+
+            cards_list.append(card_data)
+
+        logger.info(f"Retrieved {len(cards_list)} cards from official listing for collection {collection_id}")
+        return cards_list
+
+    except Exception as e:
+        logger.error(f"Error retrieving cards from official listing for collection {collection_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not retrieve cards from official listing: {str(e)}")
+
+async def withdraw_from_official_listing(collection_id: str, card_id: str, quantity: int = 1) -> dict:
+    """
+    Withdraws a card from the official_listing collection.
+    This function reverses what add_to_official_listing does:
+    - Gets the card from the official_listing collection
+    - Updates the original card in Firestore:
+      - Increases the quantity field by the specified quantity
+      - Decreases the quantity_in_offical_marketplace field by the specified quantity
+    - Updates the card in the official_listing collection:
+      - Decreases the quantity field by the specified quantity
+      - If the quantity becomes 0, removes the card from the official_listing collection
+
+    Args:
+        collection_id: The ID of the collection the card belongs to
+        card_id: The ID of the card to withdraw from the official listing
+        quantity: The quantity of cards to withdraw from the official listing (default: 1)
+
+    Returns:
+        dict: The data of the withdrawn card
+
+    Raises:
+        HTTPException: 404 if card not found, 500 for other errors
+    """
+    firestore_client = get_firestore_client()
+
+    try:
+        # Get a reference to the card in the official_listing collection
+        official_listing_ref = firestore_client.collection("official_listing").document(collection_id).collection("cards").document(card_id)
+
+        # Get the current card data from the official_listing collection
+        official_listing_doc = await official_listing_ref.get()
+        if not official_listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found in official listing for collection {collection_id}")
+
+        official_listing_data = official_listing_doc.to_dict()
+        current_listing_quantity = official_listing_data.get('quantity', 0)
+
+        if current_listing_quantity < quantity:
+            raise HTTPException(status_code=400, detail=f"Card quantity in official listing ({current_listing_quantity}) is less than requested quantity ({quantity}), cannot withdraw from marketplace")
+
+        # Get the effective collection name for updating the original card
+        if not collection_id:
+            effective_collection_name = settings.firestore_collection_cards
+        else:
+            try:
+                metadata = await get_collection_metadata(collection_id)
+                effective_collection_name = metadata.firestoreCollection
+            except HTTPException as e:
+                if e.status_code == 404:
+                    effective_collection_name = collection_id
+                else:
+                    raise e
+
+        # Get a reference to the original card document
+        original_card_ref = firestore_client.collection(effective_collection_name).document(card_id)
+
+        # Get the current card data
+        original_card_doc = await original_card_ref.get()
+        if not original_card_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Original card with ID {card_id} not found in collection {effective_collection_name}")
+
+        original_card_data = original_card_doc.to_dict()
+
+        # Update the original card:
+        # 1. Increase quantity by the specified quantity
+        # 2. Decrease quantity_in_offical_marketplace by the specified quantity
+        current_quantity = original_card_data.get('quantity', 0)
+        current_marketplace_quantity = original_card_data.get('quantity_in_offical_marketplace', 0)
+
+        # Update the original card
+        await original_card_ref.update({
+            'quantity': current_quantity + quantity,
+            'quantity_in_offical_marketplace': max(0, current_marketplace_quantity - quantity)
+        })
+
+        # Update the card in the official_listing collection
+        new_listing_quantity = current_listing_quantity - quantity
+
+        if new_listing_quantity <= 0:
+            # If the quantity becomes 0 or less, remove the card from the official_listing collection
+            await official_listing_ref.delete()
+            logger.info(f"Removed card {card_id} from collection {collection_id} from official listing (quantity became 0)")
+        else:
+            # Otherwise, update the quantity
+            await official_listing_ref.update({
+                'quantity': new_listing_quantity
+            })
+            logger.info(f"Updated card {card_id} from collection {collection_id} in official listing: decreased quantity by {quantity}")
+
+        logger.info(f"Updated original card: increased quantity by {quantity}, decreased quantity_in_offical_marketplace by {quantity}")
+
+        # Return the updated official_listing_data
+        official_listing_data['quantity'] = new_listing_quantity if new_listing_quantity > 0 else 0
+
+        # Ensure collection_id is in the returned data
+        if 'collection_id' not in official_listing_data:
+            official_listing_data['collection_id'] = collection_id
+
+        return official_listing_data
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error withdrawing card {card_id} from collection {collection_id} from official_listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not withdraw card from official listing: {str(e)}")
 
 async def get_card_by_id(document_id: str, collection_name: str | None = None) -> StoredCardInfo:
     """
