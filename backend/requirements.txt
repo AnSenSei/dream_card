@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 pydantic-settings
+pydantic[email]
 itsdangerous
 python-dotenv
 opentelemetry-api
@@ -9,3 +10,12 @@ opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-logging
 google-cloud-storage
 google-cloud-firestore
+python-jose[cryptography]
+passlib[bcrypt]
+httpx
+python-magic
+python-multipart
+# Database connection requirements
+cloud-sql-python-connector[pg8000]>=1.2.0
+pg8000>=1.23.0
+asyncpg
