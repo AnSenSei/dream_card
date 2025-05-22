@@ -221,6 +221,25 @@ class WithdrawCardsResponse(BaseModel):
     """Response model for withdrawing multiple cards"""
     cards: List[UserCard] = Field(..., description="List of withdrawn cards")
 
+class WithdrawRequest(BaseModel):
+    """Model for a withdraw request in the list of all withdraw requests"""
+    id: str = Field(..., description="The ID of the withdraw request")
+    created_at: datetime = Field(..., description="The timestamp when the withdraw request was created")
+    request_date: datetime = Field(..., description="The timestamp when the withdraw request was made")
+    status: str = Field(..., description="The status of the withdraw request (e.g., 'pending')")
+    user_id: str = Field(..., description="The ID of the user who made the withdraw request")
+    card_count: Optional[int] = Field(None, description="The number of cards in this withdraw request")
+
+class WithdrawRequestDetail(BaseModel):
+    """Model for the details of a specific withdraw request"""
+    id: str = Field(..., description="The ID of the withdraw request")
+    created_at: datetime = Field(..., description="The timestamp when the withdraw request was created")
+    request_date: datetime = Field(..., description="The timestamp when the withdraw request was made")
+    status: str = Field(..., description="The status of the withdraw request (e.g., 'pending')")
+    user_id: str = Field(..., description="The ID of the user who made the withdraw request")
+    card_count: Optional[int] = Field(None, description="The number of cards in this withdraw request")
+    cards: List[UserCard] = Field(..., description="The cards in this withdraw request")
+
 class UserListResponse(BaseModel):
     """Response model for listing users"""
     items: List[User]

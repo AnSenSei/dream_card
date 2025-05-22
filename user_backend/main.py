@@ -7,7 +7,8 @@ from fastapi.responses import HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from config import get_logger, instrument_app, settings, test_connection, close_connector
-from router import account_router, card_router, marketplace_router, rank_router
+from router import account_router, card_router, marketplace_router, rank_router, payment_router
+from service.payment_service import ensure_payment_tables_exist
 
 # Configure logging with structured logger
 logger = get_logger("main")
@@ -27,6 +28,12 @@ async def startup_db_client():
     logger.info("Testing database connection...")
     if test_connection():
         logger.info("Database connection successful")
+
+        # Ensure payment tables exist
+        if ensure_payment_tables_exist():
+            logger.info("Payment tables initialized successfully")
+        else:
+            logger.warning("Failed to initialize payment tables")
     else:
         logger.warning("Failed to establish database connection")
 
@@ -90,6 +97,9 @@ logger.info("Marketplace router included in the sub-API.")
 
 api_v1.include_router(rank_router.router)
 logger.info("Rank router included in the sub-API.")
+
+api_v1.include_router(payment_router.router)
+logger.info("Payment router included in the sub-API.")
 
 # Mount the sub-API (api_v1) under the main app (app)
 app.mount(f"/{SERVICE_PATH}/api/{API_VERSION}", api_v1)

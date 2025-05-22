@@ -16,7 +16,7 @@ from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_trans
 
 from config import get_logger, settings
 from config.db_connection import db_connection
-from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CheckCardMissingResponse, MissingCard, FusionRecipeMissingCards, RankEntry
+from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CheckCardMissingResponse, MissingCard, FusionRecipeMissingCards, RankEntry, WithdrawRequest, WithdrawRequestDetail
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs
 
 logger = get_logger(__name__)
@@ -1366,6 +1366,61 @@ async def add_points_to_user(user_id: str, points: int, db_client: AsyncClient) 
     except Exception as e:
         logger.error(f"Error adding points to user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to add points to user: {str(e)}")
+
+async def add_points_and_update_cash_recharged(user_id: str, points: int, amount_dollars: float, db_client: AsyncClient) -> User:
+    """
+    Add points to a user's pointsBalance and update totalCashRecharged.
+
+    Args:
+        user_id: The ID of the user to update
+        points: The number of points to add (must be greater than 0)
+        amount_dollars: The amount of cash recharged in dollars
+        db_client: Firestore client
+
+    Returns:
+        The updated User object
+
+    Raises:
+        HTTPException: If there's an error updating the user
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Validate points
+        if points <= 0:
+            raise HTTPException(status_code=400, detail="Points must be greater than 0")
+
+        # Validate amount
+        if amount_dollars <= 0:
+            raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+
+        # Convert amount_dollars to int for totalCashRecharged
+        amount_int = int(amount_dollars)
+
+        # Update the user's pointsBalance and totalCashRecharged
+        await user_ref.update({
+            "pointsBalance": firestore.Increment(points),
+            "totalCashRecharged": firestore.Increment(amount_int)
+        })
+
+        # Get the updated user data
+        updated_user_doc = await user_ref.get()
+        updated_user_data = updated_user_doc.to_dict()
+        updated_user = User(**updated_user_data)
+
+        logger.info(f"Added {points} points to user {user_id}. New balance: {updated_user.pointsBalance}")
+        logger.info(f"Updated totalCashRecharged for user {user_id} by ${amount_int}. New total: {updated_user.totalCashRecharged}")
+        return updated_user
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update user: {str(e)}")
 
 async def update_seed(user_id: str, db_client: AsyncClient) -> User:
     """
@@ -4100,3 +4155,116 @@ async def update_user_avatar(user_id: str, avatar: bytes, content_type: str, db_
     except Exception as e:
         logger.error(f"Error updating avatar for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update avatar: {str(e)}")
+
+
+async def get_all_withdraw_requests(user_id: str, db_client: AsyncClient) -> List[WithdrawRequest]:
+    """
+    Get all withdraw requests for a specific user.
+
+    Args:
+        user_id: The ID of the user to get withdraw requests for
+        db_client: Firestore client
+
+    Returns:
+        List of WithdrawRequest objects for the specified user
+
+    Raises:
+        HTTPException: If there's an error getting the withdraw requests or if the user doesn't exist
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get withdraw requests for this user
+        withdraw_requests_ref = user_ref.collection('withdraw_requests')
+        withdraw_requests = await withdraw_requests_ref.get()
+
+        user_withdraw_requests = []
+
+        # Convert each withdraw request to a WithdrawRequest object
+        for request in withdraw_requests:
+            request_data = request.to_dict()
+            withdraw_request = WithdrawRequest(
+                id=request.id,
+                created_at=request_data.get('created_at'),
+                request_date=request_data.get('request_date'),
+                status=request_data.get('status', 'pending'),
+                user_id=request_data.get('user_id', user_id),
+                card_count=request_data.get('card_count')
+            )
+            user_withdraw_requests.append(withdraw_request)
+
+        logger.info(f"Retrieved {len(user_withdraw_requests)} withdraw requests for user {user_id}")
+        return user_withdraw_requests
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting withdraw requests for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get withdraw requests for user {user_id}: {str(e)}")
+
+
+async def get_withdraw_request_by_id(request_id: str, user_id: str, db_client: AsyncClient) -> WithdrawRequestDetail:
+    """
+    Get a specific withdraw request by ID.
+
+    Args:
+        request_id: The ID of the withdraw request to get
+        user_id: The ID of the user who made the withdraw request
+        db_client: Firestore client
+
+    Returns:
+        WithdrawRequestDetail object containing the withdraw request details and cards
+
+    Raises:
+        HTTPException: If there's an error getting the withdraw request
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the withdraw request
+        withdraw_request_ref = user_ref.collection('withdraw_requests').document(request_id)
+        withdraw_request_doc = await withdraw_request_ref.get()
+
+        if not withdraw_request_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Withdraw request with ID {request_id} not found for user {user_id}")
+
+        # Get the withdraw request data
+        withdraw_request_data = withdraw_request_doc.to_dict()
+
+        # Get the cards in the withdraw request
+        cards_ref = withdraw_request_ref.collection('cards')
+        cards_docs = await cards_ref.get()
+
+        cards = []
+        for card_doc in cards_docs:
+            card_data = card_doc.to_dict()
+            card = UserCard(**card_data)
+            cards.append(card)
+
+        # Create and return the WithdrawRequestDetail object
+        withdraw_request_detail = WithdrawRequestDetail(
+            id=withdraw_request_doc.id,
+            created_at=withdraw_request_data.get('created_at'),
+            request_date=withdraw_request_data.get('request_date'),
+            status=withdraw_request_data.get('status', 'pending'),
+            user_id=withdraw_request_data.get('user_id', user_id),
+            card_count=withdraw_request_data.get('card_count', len(cards)),
+            cards=cards
+        )
+
+        logger.info(f"Retrieved withdraw request {request_id} for user {user_id} with {len(cards)} cards")
+        return withdraw_request_detail
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get withdraw request: {str(e)}")

@@ -15,6 +15,7 @@ passlib[bcrypt]
 httpx
 python-magic
 python-multipart
+stripe
 # Database connection requirements
 cloud-sql-python-connector[pg8000]>=1.2.0
 pg8000>=1.23.0

@@ -3,7 +3,7 @@ from typing import Optional, List
 from google.cloud import firestore
 from pydantic import BaseModel
 
-from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse
+from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse, WithdrawRequest, WithdrawRequestDetail
 from service.user_service import (
     add_multiple_cards_to_user,
     draw_card_from_pack,
@@ -20,6 +20,8 @@ from service.user_service import (
     delete_card_from_highlights,
     add_card_to_user,
     add_cards_and_deduct_points,
+    get_all_withdraw_requests,
+    get_withdraw_request_by_id,
 )
 from config import get_firestore_client, get_logger
 
@@ -133,6 +135,7 @@ async def add_cards_with_points_route(
 @router.get("/{user_id}/cards", response_model=UserCardsResponse)
 async def get_user_cards_route(
     user_id: str = Path(...),
+    collection_id: str = Query(..., description="The ID of the collection to get cards from"),
     page: int = Query(1, description="Page number (default: 1)"),
     per_page: int = Query(10, description="Items per page (default: 10)"),
     sort_by: str = Query("date_got", description="Field to sort by (default: date_got)"),
@@ -145,10 +148,11 @@ async def get_user_cards_route(
 
     This endpoint:
     1. Takes a user ID as a path parameter
-    2. Supports pagination with page and per_page query parameters
-    3. Supports sorting with sort_by and sort_order query parameters
-    4. Supports searching with search_query query parameter
-    5. Returns a list of cards grouped by subcollection
+    2. Requires a collection_id query parameter to specify which subcollection to get cards from
+    3. Supports pagination with page and per_page query parameters
+    4. Supports sorting with sort_by and sort_order query parameters
+    5. Supports searching with search_query query parameter
+    6. Returns a list of cards grouped by subcollection
     """
     try:
         cards_response = await get_user_cards(
@@ -158,7 +162,8 @@ async def get_user_cards_route(
             per_page=per_page,
             sort_by=sort_by,
             sort_order=sort_order,
-            search_query=search_query
+            search_query=search_query,
+            subcollection_name=collection_id
         )
         return cards_response
     except HTTPException:
@@ -537,3 +542,63 @@ async def check_missing_cards_route(
     except Exception as e:
         logger.error(f"Error checking missing cards for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while checking missing cards")
+
+
+@router.get("/{user_id}/withdraw-requests", response_model=List[WithdrawRequest])
+async def get_all_withdraw_requests_route(
+    user_id: str = Path(..., description="The ID of the user to get withdraw requests for"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    List all withdraw requests for a specific user.
+
+    This endpoint:
+    1. Takes a user ID as a path parameter
+    2. Retrieves all withdraw requests for that user
+    3. Returns a list of withdraw requests with the following fields:
+       - created_at: timestamp when the request was created
+       - request_date: timestamp when the request was made
+       - status: string indicating the status of the request (e.g., 'pending')
+       - user_id: string identifying the user who made the request
+    """
+    try:
+        withdraw_requests = await get_all_withdraw_requests(user_id=user_id, db_client=db)
+        return withdraw_requests
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting withdraw requests for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while retrieving withdraw requests")
+
+
+@router.get("/{user_id}/withdraw-requests/{request_id}", response_model=WithdrawRequestDetail)
+async def get_withdraw_request_by_id_route(
+    user_id: str = Path(..., description="The ID of the user who made the withdraw request"),
+    request_id: str = Path(..., description="The ID of the withdraw request to retrieve"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Get details of a specific withdraw request by ID for a specific user.
+
+    This endpoint:
+    1. Takes a user ID and request ID as path parameters
+    2. Retrieves the withdraw request with the specified ID for the specified user
+    3. Returns the withdraw request details, including:
+       - created_at: timestamp when the request was created
+       - request_date: timestamp when the request was made
+       - status: string indicating the status of the request (e.g., 'pending')
+       - user_id: string identifying the user who made the request
+       - cards: list of cards included in the withdraw request
+    """
+    try:
+        withdraw_request = await get_withdraw_request_by_id(
+            request_id=request_id,
+            user_id=user_id,
+            db_client=db
+        )
+        return withdraw_request
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while retrieving the withdraw request")

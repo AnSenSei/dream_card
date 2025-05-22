@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     # Backend service URLs
     storage_service_url: str = "http://0.0.0.0:8080"  # For local testing
 
+    # Stripe API settings
+    stripe_api_key: str = "sk_test_51RRaUk4STmMQIYMZkwfGsWvGFIEC6gW4zu6KXq56iUSeTmNmSDsa0zrdNO8KNTGL5YwWRM6sOurnc8tNww2o2aOM00ezEKdaKK"
+    # This should be set to the actual webhook signing secret from the Stripe dashboard in production
+    stripe_webhook_secret: str = "whsec_bb78eae4c3e2298b72421adc7832706371a28e7ef24aa2c78741a7698040c935"
+
     # Add other configurations here, e.g., database URLs, API keys
 
     class Config:

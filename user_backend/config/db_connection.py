@@ -39,7 +39,7 @@ connector = Connector()
 def get_connection_pg8000():
     """
     Returns a database connection using pg8000 driver.
-    
+
     Returns:
         pg8000.dbapi.Connection: A database connection object
     """
@@ -61,7 +61,7 @@ def get_connection_pg8000():
 def get_connection_psycopg2():
     """
     Returns a database connection using psycopg2 driver.
-    
+
     Returns:
         psycopg2.extensions.connection: A database connection object
     """
@@ -86,10 +86,10 @@ get_connection = get_connection_pg8000
 def db_connection():
     """
     Context manager for database connections.
-    
+
     Yields:
         Connection: A database connection that will be automatically closed.
-    
+
     Example:
         with db_connection() as conn:
             cursor = conn.cursor()
@@ -111,13 +111,13 @@ def db_connection():
 def db_cursor(commit=False):
     """
     Context manager for database cursors.
-    
+
     Args:
         commit (bool): Whether to commit the transaction when exiting.
-    
+
     Yields:
         Cursor: A database cursor that will be automatically closed.
-    
+
     Example:
         with db_cursor(commit=True) as cursor:
             cursor.execute("INSERT INTO your_table VALUES (%s, %s)", [value1, value2])
@@ -136,30 +136,83 @@ def db_cursor(commit=False):
         finally:
             cursor.close()
 
-def execute_query(query: str, params: Optional[Dict[str, Any]] = None, fetch: bool = True):
+def execute_query(query: str, params: Optional[Any] = None, fetch: bool = True):
     """
     Execute a SQL query and optionally fetch results.
-    
+
     Args:
         query (str): SQL query to execute
-        params (dict, optional): Parameters for the query
+        params (Any, optional): Parameters for the query (can be dict for named params or tuple/list for positional)
         fetch (bool): Whether to fetch and return results
-    
+
     Returns:
         list: Query results if fetch is True, else None
-    
+
     Example:
-        # Select query
-        results = execute_query("SELECT * FROM users WHERE id = %(user_id)s", {"user_id": 1})
-        
-        # Insert/update query
-        execute_query("INSERT INTO logs (message) VALUES (%(message)s)", {"message": "Test"}, fetch=False)
+        # Select query with named parameters (not supported by pg8000)
+        # results = execute_query("SELECT * FROM users WHERE id = %(user_id)s", {"user_id": 1})
+
+        # Select query with positional parameters (supported by pg8000)
+        results = execute_query("SELECT * FROM users WHERE id = %s", (1,))
+
+        # Insert/update query with positional parameters
+        execute_query("INSERT INTO logs (message) VALUES (%s)", ("Test message",), fetch=False)
     """
-    with db_cursor(commit=not fetch) as cursor:
+    connection = None
+    cursor = None
+    try:
+        connection = get_connection()
+        cursor = connection.cursor()
+        
+        # Set autocommit based on fetch parameter
+        # For SELECT queries (fetch=True), we don't need to commit
+        # For INSERT/UPDATE/DELETE queries (fetch=False), we need to commit
+        connection.autocommit = False
+        
+        # Log the query (without sensitive parameters)
+        query_start = query.strip().split()[0].upper() if query.strip() else "UNKNOWN"
+        logger.debug(f"Executing {query_start} query")
+        
+        # Execute the query
         cursor.execute(query, params or {})
+        
+        # Fetch results if needed
+        result = None
         if fetch:
-            return cursor.fetchall()
-        return None
+            result = cursor.fetchall()
+        else:
+            # For non-fetch queries (INSERT/UPDATE/DELETE), commit the transaction
+            connection.commit()
+            logger.debug(f"{query_start} query successfully committed")
+            
+        return result
+    except Exception as e:
+        if connection and not fetch:
+            # Rollback for non-fetch queries that might have modified data
+            try:
+                connection.rollback()
+                logger.warning(f"Transaction rolled back due to error: {str(e)}")
+            except Exception as rollback_error:
+                logger.error(f"Error during rollback: {str(rollback_error)}")
+        
+        # Include query type in error log
+        query_type = query.strip().split()[0].upper() if query and query.strip() else "UNKNOWN"
+        logger.error(f"Database error executing {query_type} query: {str(e)}", exc_info=True)
+        raise
+    finally:
+        # Close cursor and connection
+        if cursor:
+            try:
+                cursor.close()
+            except Exception as e:
+                logger.warning(f"Error closing cursor: {str(e)}")
+        
+        if connection:
+            try:
+                connection.close()
+                logger.debug("Database connection closed")
+            except Exception as e:
+                logger.warning(f"Error closing connection: {str(e)}")
 
 def close_connector():
     """
@@ -172,24 +225,68 @@ def close_connector():
 def test_connection():
     """
     Test the database connection by executing a simple query.
-    
+
     Returns:
         bool: True if connection successful, False otherwise
     """
     try:
         with db_cursor() as cursor:
+            # Check PostgreSQL version
             cursor.execute("SELECT version();")
             version = cursor.fetchone()
             logger.info(f"Connected to PostgreSQL: {version[0]}")
+            
+            # Check if our tables exist
+            cursor.execute("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' AND 
+                      table_name IN ('cash_recharges', 'transactions')
+            """)
+            tables = cursor.fetchall()
+            existing_tables = [table[0] for table in tables]
+            
+            if 'cash_recharges' in existing_tables:
+                logger.info("cash_recharges table exists")
+            else:
+                logger.warning("cash_recharges table does not exist")
+                
+            if 'transactions' in existing_tables:
+                logger.info("transactions table exists")
+            else:
+                logger.warning("transactions table does not exist")
+                
+            # Check connection parameters
+            cursor.execute("SHOW server_version;")
+            server_version = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT current_database();")
+            current_db = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT current_user;")
+            current_user = cursor.fetchone()[0]
+            
+            logger.info(f"Database details - Name: {current_db}, User: {current_user}, Version: {server_version}")
+            
             return True
     except Exception as e:
-        logger.error(f"Connection test failed: {e}")
+        logger.error(f"Connection test failed: {e}", exc_info=True)
+        
+        # Try to provide more diagnostic information
+        try:
+            # Check if we can connect at all
+            conn = get_connection()
+            logger.info("Basic connection succeeded but query failed")
+            conn.close()
+        except Exception as conn_error:
+            logger.error(f"Could not establish basic connection: {str(conn_error)}")
+            
         return False
 
 if __name__ == "__main__":
     # Setup basic logging
     logging.basicConfig(level=logging.INFO)
-    
+
     # Test the connection
     if test_connection():
         print("Successfully connected to the database!")
