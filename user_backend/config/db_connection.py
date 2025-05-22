@@ -7,28 +7,19 @@ provides methods for obtaining connections that can be used across the applicati
 """
 
 from typing import Any, Dict, Optional
-import os
 import logging
 from contextlib import contextmanager
 
 # Import the Cloud SQL Python Connector
 from google.cloud.sql.connector import Connector, IPTypes
 
+# Import settings
+from .settings import settings
+
 # You can choose either pg8000 or psycopg2 as your PostgreSQL driver
 # Uncomment the one you want to use
 import pg8000  # Pure Python PostgreSQL driver
 # import psycopg2  # C-based PostgreSQL driver
-
-# Constants from environment or hardcoded for development
-# In production, use environment variables for sensitive data
-INSTANCE_CONNECTION_NAME = os.getenv(
-    "DB_INSTANCE_CONNECTION_NAME", 
-    "seventh-program-433718-h8:us-central1:test"
-)
-DB_USER = os.getenv("DB_USER", "test")  # Replace with your actual username
-DB_PASS = os.getenv("DB_PASS", "Qjh19981201!")  # Replace with your actual password
-DB_NAME = os.getenv("DB_NAME", "test")      # Replace with your actual database name
-DB_PORT = int(os.getenv("DB_PORT", "5432"))
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -45,11 +36,11 @@ def get_connection_pg8000():
     """
     try:
         conn = connector.connect(
-            INSTANCE_CONNECTION_NAME,
+            settings.db_instance_connection_name,
             "pg8000",
-            user=DB_USER,
-            password=DB_PASS,
-            db=DB_NAME,
+            user=settings.db_user,
+            password=settings.db_pass,
+            db=settings.db_name,
             ip_type=IPTypes.PUBLIC  # Use PUBLIC since we're connecting to a public IP
         )
         return conn
@@ -67,11 +58,11 @@ def get_connection_psycopg2():
     """
     try:
         conn = connector.connect(
-            INSTANCE_CONNECTION_NAME,
+            settings.db_instance_connection_name,
             "psycopg2",
-            user=DB_USER,
-            password=DB_PASS,
-            db=DB_NAME,
+            user=settings.db_user,
+            password=settings.db_pass,
+            db=settings.db_name,
             ip_type=IPTypes.PUBLIC  # Use PUBLIC since we're connecting to a public IP
         )
         return conn
@@ -163,19 +154,19 @@ def execute_query(query: str, params: Optional[Any] = None, fetch: bool = True):
     try:
         connection = get_connection()
         cursor = connection.cursor()
-        
+
         # Set autocommit based on fetch parameter
         # For SELECT queries (fetch=True), we don't need to commit
         # For INSERT/UPDATE/DELETE queries (fetch=False), we need to commit
         connection.autocommit = False
-        
+
         # Log the query (without sensitive parameters)
         query_start = query.strip().split()[0].upper() if query.strip() else "UNKNOWN"
         logger.debug(f"Executing {query_start} query")
-        
+
         # Execute the query
         cursor.execute(query, params or {})
-        
+
         # Fetch results if needed
         result = None
         if fetch:
@@ -184,7 +175,7 @@ def execute_query(query: str, params: Optional[Any] = None, fetch: bool = True):
             # For non-fetch queries (INSERT/UPDATE/DELETE), commit the transaction
             connection.commit()
             logger.debug(f"{query_start} query successfully committed")
-            
+
         return result
     except Exception as e:
         if connection and not fetch:
@@ -194,7 +185,7 @@ def execute_query(query: str, params: Optional[Any] = None, fetch: bool = True):
                 logger.warning(f"Transaction rolled back due to error: {str(e)}")
             except Exception as rollback_error:
                 logger.error(f"Error during rollback: {str(rollback_error)}")
-        
+
         # Include query type in error log
         query_type = query.strip().split()[0].upper() if query and query.strip() else "UNKNOWN"
         logger.error(f"Database error executing {query_type} query: {str(e)}", exc_info=True)
@@ -206,7 +197,7 @@ def execute_query(query: str, params: Optional[Any] = None, fetch: bool = True):
                 cursor.close()
             except Exception as e:
                 logger.warning(f"Error closing cursor: {str(e)}")
-        
+
         if connection:
             try:
                 connection.close()
@@ -235,7 +226,7 @@ def test_connection():
             cursor.execute("SELECT version();")
             version = cursor.fetchone()
             logger.info(f"Connected to PostgreSQL: {version[0]}")
-            
+
             # Check if our tables exist
             cursor.execute("""
                 SELECT table_name 
@@ -245,33 +236,33 @@ def test_connection():
             """)
             tables = cursor.fetchall()
             existing_tables = [table[0] for table in tables]
-            
+
             if 'cash_recharges' in existing_tables:
                 logger.info("cash_recharges table exists")
             else:
                 logger.warning("cash_recharges table does not exist")
-                
+
             if 'transactions' in existing_tables:
                 logger.info("transactions table exists")
             else:
                 logger.warning("transactions table does not exist")
-                
+
             # Check connection parameters
             cursor.execute("SHOW server_version;")
             server_version = cursor.fetchone()[0]
-            
+
             cursor.execute("SELECT current_database();")
             current_db = cursor.fetchone()[0]
-            
+
             cursor.execute("SELECT current_user;")
             current_user = cursor.fetchone()[0]
-            
+
             logger.info(f"Database details - Name: {current_db}, User: {current_user}, Version: {server_version}")
-            
+
             return True
     except Exception as e:
         logger.error(f"Connection test failed: {e}", exc_info=True)
-        
+
         # Try to provide more diagnostic information
         try:
             # Check if we can connect at all
@@ -280,7 +271,7 @@ def test_connection():
             conn.close()
         except Exception as conn_error:
             logger.error(f"Could not establish basic connection: {str(conn_error)}")
-            
+
         return False
 
 if __name__ == "__main__":

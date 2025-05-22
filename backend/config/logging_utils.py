@@ -1,10 +1,15 @@
 import logging
 import sys
+from .settings import settings
 
-def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
+def get_logger(name: str, level: int = None) -> logging.Logger:
     """
     Configures and returns a logger.
     """
+    # Use the level from settings if not provided
+    if level is None:
+        level_name = settings.log_level.upper()
+        level = getattr(logging, level_name, logging.INFO)
     logger = logging.getLogger(name)
     logger.setLevel(level)
 

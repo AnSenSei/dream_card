@@ -1,16 +1,25 @@
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
+    # Application settings
     app_name: str = "Card Gacha API"
+
+    # Google Cloud Storage settings
     gcs_project_id: str = "seventh-program-433718-h8"
     gcs_bucket_name: str = "pokemon_cards_pull"
-    firestore_project_id: str = "seventh-program-433718-h8" # Use the actual Project ID
+    PACKS_BUCKET: str = "pack_covers"
+
+    # Firestore settings
+    firestore_project_id: str = "seventh-program-433718-h8"
     firestore_collection_cards: str = "pokemon"
     meta_data_collection: str = "collection_meta_data"
-    PACKS_BUCKET:str =  "pack_covers"
+    quota_project_id: str = "seventh-program-433718-h8"
+
     # User backend service configuration
     user_backend_url: str = "http://localhost:8082/users/api/v1"
-    # Add other configurations here, e.g., database URLs, API keys
+
+    # Logging settings
+    log_level: str = "INFO"
 
     class Config:
         env_file = ".env" # If you want to use an.env file for configuration
