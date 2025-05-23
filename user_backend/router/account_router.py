@@ -90,7 +90,12 @@ async def update_user_email_and_avatar_route(
     Update a user's email and avatar.
     """
     try:
-        updated_user = await update_user_email_and_address(user_id, update_data, db)
+        updated_user = await update_user_email_and_address(
+            user_id=user_id, 
+            email=update_data.email, 
+            db_client=db,
+            avatar=update_data.avatar
+        )
         return updated_user
     except HTTPException:
         raise

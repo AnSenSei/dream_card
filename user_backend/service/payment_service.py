@@ -214,6 +214,91 @@ async def handle_stripe_webhook(request: Request, signature: str, db_client: Asy
             detail=f"An unexpected error occurred, Stripe should retry this webhook: {str(e)}"
         )
 
+async def get_user_recharge_history(user_id: str, db_client: AsyncClient) -> Dict[str, Any]:
+    """
+    Retrieve a user's recharge history and total amount recharged.
+
+    Args:
+        user_id: The ID of the user
+        db_client: Firestore client
+
+    Returns:
+        Dict containing the user's recharge history and total
+
+    Raises:
+        HTTPException: If there's an error retrieving the data or user not found
+    """
+    try:
+        # Validate user_id by checking if user exists in Firestore
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            logger.error(f"User with ID {user_id} not found when fetching recharge history")
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        user_data = user_doc.to_dict()
+        
+        # Get total amount recharged from Firestore
+        total_cash_recharged = user_data.get("totalCashRecharged", 0)
+        
+        # Query the cash_recharges table in PostgreSQL
+        from config.db_connection import db_connection
+        
+        recharge_history = []
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT id, amount_cash, points_granted, created_at 
+                    FROM cash_recharges 
+                    WHERE user_id = %s 
+                    ORDER BY created_at DESC
+                    """,
+                    (user_id,)
+                )
+                
+                # Convert query results to a list of dictionaries
+                recharge_records = cursor.fetchall()
+                
+                # Get column names
+                column_names = [desc[0] for desc in cursor.description]
+                
+                # Create list of dictionaries from results
+                for record in recharge_records:
+                    recharge_dict = dict(zip(column_names, record))
+                    # Format datetime for JSON serialization
+                    if 'created_at' in recharge_dict and recharge_dict['created_at']:
+                        recharge_dict['created_at'] = recharge_dict['created_at'].isoformat()
+                    recharge_history.append(recharge_dict)
+                
+            except Exception as db_error:
+                logger.error(f"Database error when fetching recharge history for user {user_id}: {str(db_error)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to retrieve recharge history: {str(db_error)}"
+                )
+            finally:
+                cursor.close()
+        
+        # Return the user's recharge information
+        return {
+            "user_id": user_id,
+            "total_cash_recharged": total_cash_recharged,
+            "recharge_history": recharge_history
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving recharge history for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )
+
 async def handle_payment_succeeded(payment_intent: Dict[str, Any], db_client: AsyncClient) -> Dict[str, Any]:
     """
     Handle a successful payment intent event.

@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     # Stripe API settings
     stripe_api_key: str
     stripe_webhook_secret: str
+
+    #shippo API KEY
+    shippo_api_key: str
+
     # Database connection settings
     db_instance_connection_name: str
     db_user: str

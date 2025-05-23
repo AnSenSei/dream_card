@@ -6,6 +6,7 @@ from uuid import UUID
 class Address(BaseModel):
     """Model for a user address"""
     id: Optional[str] = None  # Optional identifier like "home" or "work"
+    name: str  # Name for the address (e.g., "John Smith")
     street: str
     city: str
     state: str
@@ -92,8 +93,11 @@ class UserCardsResponse(BaseModel):
 
 class UserEmailAddressUpdate(BaseModel):
     """Request model for updating user email and avatar"""
-    email: str
-    avatar: Optional[str] = None  # Can be base64 encoded string or binary data
+    email: Optional[str] = None
+    avatar: Optional[Any] = None  # Can be base64 encoded string or binary data
+
+    class Config:
+        arbitrary_types_allowed = True  # Allow binary data for avatar
 
 class DrawnCard(BaseModel):
     """Model for a card drawn from a pack"""
@@ -169,6 +173,11 @@ class OfferCashRequest(BaseModel):
     """Request model for offering cash for a listing"""
     cash: float = Field(..., gt=0, description="The amount of cash to offer (must be greater than 0)")
 
+
+class AllOffersResponse(BaseModel):
+    """Response model for getting all offers for a user"""
+    offers: List[Dict[str, Any]] = Field(..., description="List of all offers")
+
 class UpdatePointOfferRequest(BaseModel):
     """Request model for updating a point offer for a listing"""
     points: int = Field(..., gt=0, description="The new number of points to offer (must be greater than the current offer)")
@@ -211,11 +220,13 @@ class CardToWithdraw(BaseModel):
     """Model for a card to withdraw"""
     card_id: str = Field(..., description="The ID of the card to withdraw")
     quantity: int = Field(1, gt=0, description="The quantity to withdraw (default: 1)")
+    subcollection_name: str = Field(..., description="The name of the subcollection where the card is stored")
 
 class WithdrawCardsRequest(BaseModel):
     """Request model for withdrawing multiple cards"""
     cards: List[CardToWithdraw] = Field(..., description="List of cards to withdraw")
-    subcollection_name: str = Field(..., description="The name of the subcollection where the cards are stored")
+    address_id: str = Field(..., description="The ID of the address to ship the cards to")
+    phone_number: str = Field(..., description="The phone number of the recipient for shipping purposes")
 
 class WithdrawCardsResponse(BaseModel):
     """Response model for withdrawing multiple cards"""
@@ -226,19 +237,37 @@ class WithdrawRequest(BaseModel):
     id: str = Field(..., description="The ID of the withdraw request")
     created_at: datetime = Field(..., description="The timestamp when the withdraw request was created")
     request_date: datetime = Field(..., description="The timestamp when the withdraw request was made")
-    status: str = Field(..., description="The status of the withdraw request (e.g., 'pending')")
+    status: str = Field(..., description="The status of the withdraw request (e.g., 'pending', 'label_created', 'shipped', 'delivered')")
     user_id: str = Field(..., description="The ID of the user who made the withdraw request")
     card_count: Optional[int] = Field(None, description="The number of cards in this withdraw request")
+    shipping_address: Optional[Dict[str, Any]] = Field(None, description="The shipping address for this withdraw request")
+    shippo_address_id: Optional[str] = Field(None, description="The Shippo address ID")
+    shippo_parcel_id: Optional[str] = Field(None, description="The Shippo parcel ID")
+    shippo_shipment_id: Optional[str] = Field(None, description="The Shippo shipment ID")
+    shippo_transaction_id: Optional[str] = Field(None, description="The Shippo transaction ID for label purchase")
+    shippo_label_url: Optional[str] = Field(None, description="The URL for the shipping label PDF")
+    tracking_number: Optional[str] = Field(None, description="The tracking number for the shipment")
+    tracking_url: Optional[str] = Field(None, description="The URL for tracking the shipment")
+    shipping_status: Optional[str] = Field(None, description="The status of the shipment (e.g., 'label_created', 'shipped', 'delivered')")
 
 class WithdrawRequestDetail(BaseModel):
     """Model for the details of a specific withdraw request"""
     id: str = Field(..., description="The ID of the withdraw request")
     created_at: datetime = Field(..., description="The timestamp when the withdraw request was created")
     request_date: datetime = Field(..., description="The timestamp when the withdraw request was made")
-    status: str = Field(..., description="The status of the withdraw request (e.g., 'pending')")
+    status: str = Field(..., description="The status of the withdraw request (e.g., 'pending', 'label_created', 'shipped', 'delivered')")
     user_id: str = Field(..., description="The ID of the user who made the withdraw request")
     card_count: Optional[int] = Field(None, description="The number of cards in this withdraw request")
     cards: List[UserCard] = Field(..., description="The cards in this withdraw request")
+    shipping_address: Optional[Dict[str, Any]] = Field(None, description="The shipping address for this withdraw request")
+    shippo_address_id: Optional[str] = Field(None, description="The Shippo address ID")
+    shippo_parcel_id: Optional[str] = Field(None, description="The Shippo parcel ID")
+    shippo_shipment_id: Optional[str] = Field(None, description="The Shippo shipment ID")
+    shippo_transaction_id: Optional[str] = Field(None, description="The Shippo transaction ID for label purchase")
+    shippo_label_url: Optional[str] = Field(None, description="The URL for the shipping label PDF")
+    tracking_number: Optional[str] = Field(None, description="The tracking number for the shipment")
+    tracking_url: Optional[str] = Field(None, description="The URL for tracking the shipment")
+    shipping_status: Optional[str] = Field(None, description="The status of the shipment (e.g., 'label_created', 'shipped', 'delivered')")
 
 class UserListResponse(BaseModel):
     """Response model for listing users"""
@@ -255,6 +284,42 @@ class RankEntry(BaseModel):
 
     def __str__(self) -> str:
         return f"{self.user_id}:{self.spent}"
+
+class AcceptedOffer(BaseModel):
+    """Model for an accepted offer (cash or point)"""
+    amount: float
+    at: datetime
+    card_reference: str
+    collection_id: str
+    expiresAt: datetime
+    image_url: str
+    listingId: str
+    offererRef: str
+    offerreference: str
+    payment_due: datetime
+    status: str
+    type: str
+
+class AcceptedOffersResponse(BaseModel):
+    """Response model for listing accepted offers (cash or point)"""
+    offers: List[AcceptedOffer]
+
+class PackOpeningHistory(BaseModel):
+    id: int
+    user_id: str
+    pack_type: str
+    pack_count: int
+    price_points: int
+    client_seed: str
+    nonce: int
+    server_seed_hash: str
+    server_seed: str
+    random_hash: str
+    opened_at: datetime
+
+class PackOpeningHistoryResponse(BaseModel):
+    pack_openings: List[PackOpeningHistory]
+    total_count: int
 
 # Note: For file uploads, we don't use a Pydantic model
 # The avatar upload endpoint will use FastAPI's File and UploadFile directly

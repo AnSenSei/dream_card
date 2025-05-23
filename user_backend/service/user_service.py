@@ -11,15 +11,113 @@ from datetime import datetime, timedelta
 from fastapi import HTTPException
 import httpx
 import asyncpg
+from shippo import Shippo
+from shippo.models import components
 from google.cloud import firestore
 from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_transactional, Increment
 
 from config import get_logger, settings
 from config.db_connection import db_connection
 from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CheckCardMissingResponse, MissingCard, FusionRecipeMissingCards, RankEntry, WithdrawRequest, WithdrawRequestDetail
-from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs
+from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs, parse_base64_image
 
 logger = get_logger(__name__)
+
+async def validate_address_with_shippo(address: Address) -> bool:
+    """
+    Validate an address using the latest Shippo Python SDK.
+
+    Args:
+        address: The address object to validate (including name)
+
+    Returns:
+        True if the address is valid, False otherwise
+
+    Raises:
+        HTTPException: If there's an error validating the address
+    """
+    try:
+        # Configure Shippo SDK
+        if not hasattr(settings, 'shippo_api_key') or not settings.shippo_api_key:
+            logger.error("Shippo API key not configured")
+            raise HTTPException(status_code=500, detail="Address validation service not configured")
+
+        # Initialize the Shippo SDK with API key
+        shippo_sdk = Shippo(
+            api_key_header=settings.shippo_api_key
+        )
+
+        # Create address object for validation using the new SDK structure
+        logger.info(f"Validating address for {address.name}: {address.street}, {address.city}, {address.state}, {address.zip}, {address.country}")
+
+        # Create and validate the address using the new SDK
+        validation_result = shippo_sdk.addresses.create(
+            components.AddressCreateRequest(
+                name=address.name,
+                street1=address.street,
+                city=address.city,
+                state=address.state,
+                zip=address.zip,
+                country=address.country,
+                validate=True
+            )
+        )
+
+        # Check if validation was successful
+        if not validation_result:
+            raise HTTPException(status_code=400, detail="Address validation failed: No response from service")
+
+        # Access validation results from the response
+        validation_results = validation_result.validation_results
+
+        if not validation_results:
+            logger.warning(f"No validation results returned for address: {validation_result}")
+            return True  # If no validation results, consider it valid (some addresses may not support validation)
+
+        # Check if the address is valid
+        is_valid = validation_results.is_valid
+
+        if not is_valid:
+            # Get validation messages for detailed error reporting
+            error_messages = []
+
+            messages = validation_results.messages or []
+            for msg in messages:
+                error_text = msg.text if hasattr(msg, 'text') else str(msg)
+                error_code = msg.code if hasattr(msg, 'code') else ""
+                if error_code:
+                    error_messages.append(f"{error_code}: {error_text}")
+                else:
+                    error_messages.append(error_text)
+
+            error_detail = "; ".join(error_messages) if error_messages else "Address validation failed"
+            logger.warning(f"Address validation failed for {address.name}: {error_detail}")
+            raise HTTPException(status_code=400, detail=f"Address validation failed: {error_detail}")
+
+        logger.info(f"Address validated successfully for {address.name}")
+        return True
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        # Handle other errors
+        logger.error(f"Unexpected error validating address: {e}", exc_info=True)
+        error_msg = str(e)
+
+        # Check if it's a Shippo-specific error
+        if "shippo" in error_msg.lower() or "api" in error_msg.lower():
+            raise HTTPException(status_code=400, detail=f"Address validation failed: {error_msg}")
+
+        # Check if it's a network/connection error
+        if any(keyword in error_msg.lower() for keyword in ['connection', 'timeout', 'network', 'dns']):
+            raise HTTPException(status_code=503, detail="Address validation service temporarily unavailable")
+
+        # Check if it's an authentication error
+        if any(keyword in error_msg.lower() for keyword in ['unauthorized', 'forbidden', 'authentication', 'api key']):
+            raise HTTPException(status_code=500, detail="Address validation service configuration error")
+
+        raise HTTPException(status_code=500, detail=f"Failed to validate address: {error_msg}")
 
 async def get_collection_metadata_from_service(collection_name: str) -> Dict:
     """
@@ -1198,19 +1296,19 @@ async def destroy_card(
     return updated_user, card
 
 
-async def update_user_email_and_address(user_id: str, email: str, db_client: AsyncClient, avatar: Optional[str] = None, addresses: Optional[List[Address]] = None) -> str:
+async def update_user_email_and_address(user_id: str, email: Optional[str] = None, db_client: AsyncClient = None, avatar: Optional[Any] = None, addresses: Optional[List[Address]] = None) -> User:
     """
     Update a user's email and avatar fields.
 
     Args:
         user_id: The ID of the user to update
-        email: The email address to set
+        email: Optional email address to update
         db_client: Firestore client
-        avatar: Optional image data for user's avatar (can be base64 encoded string or binary data)
+        avatar: Optional image data for user's avatar (can be base64 encoded string or binary data as bytes)
         addresses: Optional list of address objects with id, street, city, state, zip, and country
 
     Returns:
-        A success message
+        The updated User object with a signed URL for the avatar if it exists
 
     Raises:
         HTTPException: If there's an error updating the user
@@ -1223,27 +1321,60 @@ async def update_user_email_and_address(user_id: str, email: str, db_client: Asy
         if not user_doc.exists:
             raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
 
-        # Validate email format
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, email):
-            raise HTTPException(status_code=400, detail="Invalid email format")
+        # Get user data for display name
+        user_data = user_doc.to_dict()
+        user_name = user_data.get("displayName", "User")
 
         # Prepare update data
-        update_data = {
-            "email": email
-        }
+        update_data = {}
+
+        # Only update email if provided
+        if email is not None:
+            # Validate email format
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            if not re.match(email_pattern, email):
+                raise HTTPException(status_code=400, detail="Invalid email format")
+            update_data["email"] = email
 
         # Convert Address objects to dictionaries for Firestore if provided
         if addresses is not None:
+            # Validate each address with Shippo before updating
+            for address in addresses:
+                await validate_address_with_shippo(address)
+
             address_dicts = [address.model_dump() for address in addresses]
             update_data["addresses"] = address_dicts
 
         # Handle avatar upload if provided
         if avatar is not None:
             try:
-                # Upload avatar to GCS
-                avatar_gcs_uri = await upload_avatar_to_gcs(avatar, user_id)
-                update_data["avatar"] = avatar_gcs_uri
+                import base64
+
+                if isinstance(avatar, str) and avatar.strip():  # String avatar
+                    if avatar.startswith('data:'):
+                        # Handle base64 encoded data URI
+                        content_type, base64_data = parse_base64_image(avatar)
+                        avatar_bytes = base64.b64decode(base64_data)
+                        avatar_gcs_uri = await upload_avatar_to_gcs(avatar_bytes, user_id, content_type)
+                    else:
+                        # Assume it's a base64 string without data URI prefix
+                        try:
+                            avatar_bytes = base64.b64decode(avatar)
+                            avatar_gcs_uri = await upload_avatar_to_gcs(avatar_bytes, user_id)
+                        except Exception:
+                            # If it's not base64, treat it as a URL/string
+                            update_data["avatar"] = avatar
+                            avatar_gcs_uri = None
+                elif isinstance(avatar, bytes):  # Binary data
+                    # Handle bytes directly
+                    avatar_gcs_uri = await upload_avatar_to_gcs(avatar, user_id)
+                else:
+                    # Unsupported avatar type
+                    logger.warning(f"Unsupported avatar type: {type(avatar)}")
+                    raise HTTPException(status_code=400, detail="Unsupported avatar format")
+
+                if avatar_gcs_uri:
+                    update_data["avatar"] = avatar_gcs_uri
             except HTTPException as e:
                 # Re-raise the exception from upload_avatar_to_gcs
                 raise e
@@ -1251,36 +1382,51 @@ async def update_user_email_and_address(user_id: str, email: str, db_client: Asy
                 logger.error(f"Error uploading avatar for user {user_id}: {e}", exc_info=True)
                 raise HTTPException(status_code=500, detail=f"Failed to upload avatar: {str(e)}")
 
+        # Only update if there's something to update
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No fields provided to update")
+
         # Update the user's fields
         await user_ref.update(update_data)
 
         # Get the updated user data
         updated_user_doc = await user_ref.get()
         updated_user_data = updated_user_doc.to_dict()
+
+        # Generate a signed URL for the avatar if it's a GCS URI
+        avatar_url = updated_user_data.get('avatar')
+        if avatar_url and avatar_url.startswith('gs://'):
+            try:
+                updated_user_data['avatar'] = await generate_signed_url(avatar_url)
+                logger.info(f"Generated signed URL for user {user_id}'s avatar")
+            except Exception as e:
+                logger.error(f"Failed to generate signed URL for user {user_id}'s avatar: {e}")
+                # Keep the original avatar URL if signing fails
+
         updated_user = User(**updated_user_data)
 
-        logger.info(f"Updated email, addresses, and avatar for user {user_id}")
-        return f"Successfully updated email, addresses, and avatar for user {user_id}"
+        logger.info(f"Updated user {user_id} with fields: {list(update_data.keys())}")
+        return updated_user
     except HTTPException as e:
         raise e
     except Exception as e:
-        logger.error(f"Error updating email, addresses, and avatar for user {user_id}: {e}", exc_info=True)
+        logger.error(f"Error updating user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update user: {str(e)}")
 
-async def add_user_address(user_id: str, address: Address, db_client: AsyncClient) -> str:
+async def add_user_address(user_id: str, address: Address, db_client: AsyncClient) -> User:
     """
-    Add a new address to a user's addresses list.
+    Add a new address to a user's addresses.
 
     Args:
         user_id: The ID of the user to update
-        address: The address object to add
+        address: The Address object to add
         db_client: Firestore client
 
     Returns:
-        A success message
+        The updated User object
 
     Raises:
-        HTTPException: If there's an error updating the user
+        HTTPException: If there's an error adding the address
     """
     try:
         # Check if user exists
@@ -1290,10 +1436,7 @@ async def add_user_address(user_id: str, address: Address, db_client: AsyncClien
         if not user_doc.exists:
             raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
 
-        # Get current user data
         user_data = user_doc.to_dict()
-
-        # Get current addresses or initialize empty list
         current_addresses = user_data.get("addresses", [])
 
         # Convert Address object to dictionary for Firestore
@@ -1302,6 +1445,9 @@ async def add_user_address(user_id: str, address: Address, db_client: AsyncClien
         # If address doesn't have an ID, generate one
         if not address_dict.get("id"):
             address_dict["id"] = f"address_{len(current_addresses) + 1}"
+
+        # Validate address with Shippo
+        await validate_address_with_shippo(address)
 
         # Add the new address to the list
         current_addresses.append(address_dict)
@@ -1315,7 +1461,7 @@ async def add_user_address(user_id: str, address: Address, db_client: AsyncClien
         updated_user = User(**updated_user_data)
 
         logger.info(f"Added address with ID {address_dict['id']} to user {user_id}")
-        return f"Successfully added address with ID {address_dict['id']} to user {user_id}"
+        return updated_user
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -1505,6 +1651,11 @@ async def create_account(request: CreateAccountRequest, db_client: AsyncClient, 
                 logger.error(f"Error uploading avatar for user {user_id}: {e}", exc_info=True)
                 # Continue with account creation even if avatar upload fails
                 avatar_url = None
+
+        # Validate addresses with Shippo if any are provided
+        if request.addresses:
+            for address in request.addresses:
+                await validate_address_with_shippo(address)
 
         # Convert Address objects to dictionaries for Firestore
         addresses = [address.model_dump() for address in request.addresses]
@@ -2031,7 +2182,7 @@ async def delete_user_address(user_id: str, address_id: str, db_client: AsyncCli
         logger.error(f"Error deleting address for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete address: {str(e)}")
 
-async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dict[str, Any]], subcollection_name: str, db_client: AsyncClient) -> List[UserCard]:
+async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dict[str, Any]], address_id: str, phone_number: str, db_client: AsyncClient) -> List[UserCard]:
     """
     Withdraw or ship multiple cards from a user's collection by creating a single withdraw request.
     The withdraw request contains fields for request date and status, and a subcollection "cards" 
@@ -2039,10 +2190,14 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
     For each card, if quantity is less than the card's quantity, only move the specified quantity.
     Only remove a card from the original subcollection if the remaining quantity is 0.
 
+    This function also creates a shipment using the Shippo API and stores the shipping information
+    in the withdraw request document.
+
     Args:
         user_id: The ID of the user who owns the cards
-        cards_to_withdraw: List of dictionaries containing card_id and quantity for each card to withdraw
-        subcollection_name: The name of the subcollection where the cards are currently stored
+        cards_to_withdraw: List of dictionaries containing card_id, quantity, and subcollection_name for each card to withdraw
+        address_id: The ID of the address to ship the cards to
+        phone_number: The phone number of the recipient for shipping purposes
         db_client: Firestore client
 
     Returns:
@@ -2059,6 +2214,20 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
         if not user_doc.exists:
             raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
 
+        # Get user data to find the address
+        user_data = user_doc.to_dict()
+        user_addresses = user_data.get('addresses', [])
+
+        # Find the address with the given ID
+        shipping_address = None
+        for address in user_addresses:
+            if address.get('id') == address_id:
+                shipping_address = address
+                break
+
+        if not shipping_address:
+            raise HTTPException(status_code=404, detail=f"Address with ID {address_id} not found for user {user_id}")
+
         # Validate cards to withdraw
         if not cards_to_withdraw:
             raise HTTPException(status_code=400, detail="No cards specified for withdrawal")
@@ -2073,9 +2242,13 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
         for card_info in cards_to_withdraw:
             card_id = card_info.get('card_id')
             quantity = card_info.get('quantity', 1)
+            subcollection_name = card_info.get('subcollection_name')
 
             if not card_id:
                 raise HTTPException(status_code=400, detail="Card ID is required for each card")
+
+            if not subcollection_name:
+                raise HTTPException(status_code=400, detail=f"Subcollection name is required for card {card_id}")
 
             if quantity <= 0:
                 raise HTTPException(status_code=400, detail=f"Quantity must be greater than 0 for card {card_id}")
@@ -2102,6 +2275,7 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
             cards_data.append({
                 'card_id': card_id,
                 'quantity': quantity,
+                'subcollection_name': subcollection_name,
                 'source_card_ref': source_card_ref,
                 'source_card_data': source_card_data,
                 'remaining_quantity': card_quantity - quantity,
@@ -2120,7 +2294,9 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
                 'status': 'pending',  # Initial status is pending
                 'user_id': user_id,
                 'created_at': now,
-                'card_count': len(cards_data)  # Add count of cards in this request
+                'card_count': len(cards_data),  # Add count of cards in this request
+                'shipping_address': shipping_address,  # Add shipping address
+                'shipping_status': 'pending'  # Initial shipping status
             }
             transaction.set(new_request_ref, request_data)
 
@@ -2150,7 +2326,8 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
                     if main_card_doc.exists:
                         transaction.delete(main_card_ref)
 
-                    logger.info(f"Created withdraw request for all {quantity_to_ship} of card {card_id} from user {user_id}'s subcollection {subcollection_name}")
+                    subcollection_name = card_data['subcollection_name']
+                    logger.info(f"Created withdraw request for all {quantity_to_withdraw} of card {card_id} from user {user_id}'s subcollection {subcollection_name}")
                 else:
                     # Update the quantity in the source subcollection
                     transaction.update(source_card_ref, {"quantity": remaining_quantity})
@@ -2159,7 +2336,8 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
                     if main_card_doc.exists:
                         transaction.update(main_card_ref, {"quantity": remaining_quantity})
 
-                    logger.info(f"Created withdraw request for {quantity_to_ship} of card {card_id} from user {user_id}'s subcollection {subcollection_name}, {remaining_quantity} remaining")
+                    subcollection_name = card_data['subcollection_name']
+                    logger.info(f"Created withdraw request for {quantity_to_withdraw} of card {card_id} from user {user_id}'s subcollection {subcollection_name}, {remaining_quantity} remaining")
 
         # Execute the transaction
         transaction = db_client.transaction()
@@ -2207,6 +2385,111 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
                 withdrawn_card.request_date = updated_request_card_data["request_date"]
 
             withdrawn_cards.append(withdrawn_card)
+
+        # Now that the transaction is complete, create a shipment using Shippo API
+        try:
+            # Initialize the Shippo SDK with API key
+            if not hasattr(settings, 'shippo_api_key') or not settings.shippo_api_key:
+                logger.error("Shippo API key not configured")
+                raise HTTPException(status_code=500, detail="Shipping service not configured")
+
+            shippo_sdk = Shippo(
+                api_key_header=settings.shippo_api_key
+            )
+
+            # Create a Shippo address object for the shipping address
+            shippo_address = shippo_sdk.addresses.create(
+                components.AddressCreateRequest(
+                    name=shipping_address.get('name', ''),
+                    street1=shipping_address.get('street', ''),
+                    city=shipping_address.get('city', ''),
+                    state=shipping_address.get('state', ''),
+                    zip=shipping_address.get('zip', ''),
+                    country=shipping_address.get('country', ''),
+                    phone=phone_number,
+                    validate=True
+                )
+            )
+
+            # Create a Shippo parcel object for the package
+            shippo_parcel = shippo_sdk.parcels.create(
+                components.ParcelCreateRequest(
+                    length="8",
+                    width="6",
+                    height="2",
+                    distance_unit="in",
+                    weight="16",
+                    mass_unit="oz"
+                )
+            )
+
+            # Create a Shippo shipment object
+            shippo_shipment = shippo_sdk.shipments.create(
+                components.ShipmentCreateRequest(
+                    address_from=components.AddressCreateRequest(
+                        name="Chouka Cards",
+                        street1="123 Main St",
+                        city="San Francisco",
+                        state="CA",
+                        zip="94105",
+                        country="US",
+                        phone="+14155559999",
+                        email="support@choukacards.com"
+                    ),
+                    address_to=components.AddressCreateRequest(
+                        name=shipping_address.get('name', ''),
+                        street1=shipping_address.get('street', ''),
+                        city=shipping_address.get('city', ''),
+                        state=shipping_address.get('state', ''),
+                        zip=shipping_address.get('zip', ''),
+                        country=shipping_address.get('country', ''),
+                        phone=phone_number
+                    ),
+                    parcels=[components.ParcelCreateRequest(
+                        length="6",
+                        width="4",
+                        height="1",
+                        distance_unit="in",
+                        weight="4",
+                        mass_unit="oz"
+                    )],
+                    async_=False
+                )
+            )
+
+            cheapest_rate = min(
+                shippo_shipment.rates,
+                key=lambda r: float(r.amount)
+            )
+
+            # Create a Shippo transaction (purchase a label)
+            shippo_transaction = shippo_sdk.transactions.create(
+                components.TransactionCreateRequest(
+                    rate=cheapest_rate.object_id,
+                    label_file_type="PDF",
+                    async_=False,
+                    insurance_amount=100
+                )
+            )
+
+            # Update the withdraw request document with the Shippo-related information
+            await new_request_ref.update({
+                'shippo_address_id': shippo_address.object_id,
+                'shippo_parcel_id': shippo_parcel.object_id,
+                'shippo_shipment_id': shippo_shipment.object_id,
+                'shippo_transaction_id': shippo_transaction.object_id,
+                'shippo_label_url': shippo_transaction.label_url,
+                'tracking_number': shippo_transaction.tracking_number,
+                'tracking_url': shippo_transaction.tracking_url_provider,
+                'shipping_status': 'label_created'
+            })
+
+            logger.info(f"Successfully created shipment for withdraw request {new_request_ref.id}")
+        except Exception as e:
+            logger.error(f"Error creating shipment for withdraw request {new_request_ref.id}: {e}", exc_info=True)
+            # Don't raise an exception here, just log the error and continue
+            # The withdraw request was created successfully, but the shipment creation failed
+            # The shipment can be created manually later
 
         logger.info(f"Successfully created withdraw request for {len(withdrawn_cards)} cards from user {user_id}'s subcollection {subcollection_name}")
         return withdrawn_cards
@@ -4146,6 +4429,17 @@ async def update_user_avatar(user_id: str, avatar: bytes, content_type: str, db_
         # Get the updated user data
         updated_user_doc = await user_ref.get()
         updated_user_data = updated_user_doc.to_dict()
+
+        # Generate a signed URL for the avatar if it's a GCS URI
+        avatar_url = updated_user_data.get('avatar')
+        if avatar_url and avatar_url.startswith('gs://'):
+            try:
+                updated_user_data['avatar'] = await generate_signed_url(avatar_url)
+                logger.info(f"Generated signed URL for user {user_id}'s avatar")
+            except Exception as e:
+                logger.error(f"Failed to generate signed URL for user {user_id}'s avatar: {e}")
+                # Keep the original avatar URL if signing fails
+
         updated_user = User(**updated_user_data)
 
         logger.info(f"Updated avatar for user {user_id}")
@@ -4268,3 +4562,206 @@ async def get_withdraw_request_by_id(request_id: str, user_id: str, db_client: A
     except Exception as e:
         logger.error(f"Error getting withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get withdraw request: {str(e)}")
+
+
+async def get_user_pack_opening_history(user_id: str, page: int = 1, per_page: int = 10) -> Dict[str, Any]:
+    """
+    Get a user's pack opening history.
+
+    Args:
+        user_id: The ID of the user
+        page: The page number (default: 1)
+        per_page: The number of items per page (default: 10)
+
+    Returns:
+        A dictionary containing the pack opening history and total count
+    """
+    try:
+        logger.info(f"Getting pack opening history for user {user_id}, page {page}, per_page {per_page}")
+
+        # Calculate offset
+        offset = (page - 1) * per_page
+
+        # Query to get total count
+        count_query = "SELECT COUNT(*) FROM pack_openings WHERE user_id = %s"
+
+        # Query to get pack openings with pagination
+        query = """
+            SELECT id, user_id, pack_type, pack_count, price_points, 
+                   client_seed, nonce, server_seed_hash, server_seed, random_hash, 
+                   opened_at
+            FROM pack_openings 
+            WHERE user_id = %s
+            ORDER BY opened_at DESC
+            LIMIT %s OFFSET %s
+        """
+
+        # Execute queries
+        with db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Get total count
+            cursor.execute(count_query, (user_id,))
+            total_count = cursor.fetchone()[0]
+
+            # Get pack openings
+            cursor.execute(query, (user_id, per_page, offset))
+            pack_openings = []
+
+            for row in cursor.fetchall():
+                pack_opening = {
+                    "id": row[0],
+                    "user_id": row[1],
+                    "pack_type": row[2],
+                    "pack_count": row[3],
+                    "price_points": row[4],
+                    "client_seed": row[5],
+                    "nonce": row[6],
+                    "server_seed_hash": row[7],
+                    "server_seed": row[8],
+                    "random_hash": row[9],
+                    "opened_at": row[10]
+                }
+                pack_openings.append(pack_opening)
+
+        logger.info(f"Found {len(pack_openings)} pack openings for user {user_id} (total: {total_count})")
+
+        return {
+            "pack_openings": pack_openings,
+            "total_count": total_count
+        }
+    except Exception as e:
+        logger.error(f"Error getting pack opening history for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get pack opening history: {str(e)}")
+
+async def get_all_offers(user_id: str, offer_type: str, db_client: AsyncClient) -> List[Dict[str, Any]]:
+    """
+    Get all offers for a specific user (regardless of status).
+
+    Args:
+        user_id: The ID of the user to get offers for
+        offer_type: The type of offer to get (cash or point)
+        db_client: Firestore client
+
+    Returns:
+        List of all offers for the specified user
+
+    Raises:
+        HTTPException: If there's an error getting the offers or if the user doesn't exist
+    """
+    logger = get_logger(__name__)
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Directly access the user's offers subcollection
+        subcollection_name = "my_cash_offers" if offer_type == "cash" else "my_point_offers"
+        offers_ref = user_ref.collection(subcollection_name)
+
+        all_offers = []
+        async for offer_doc in offers_ref.stream():
+            offer_data = offer_doc.to_dict()
+
+            # Get the listing details to include card information
+            listing_ref = db_client.collection('listings').document(offer_data.get('listingId', ''))
+            listing_doc = await listing_ref.get()
+
+            if listing_doc.exists:
+                listing_data = listing_doc.to_dict()
+
+                # Create the offer object with all required fields
+                offer_obj = {
+                    'amount': offer_data.get('amount', 0),
+                    'at': offer_data.get('createdAt', datetime.now()),
+                    'card_reference': listing_data.get('card_reference', ''),
+                    'collection_id': listing_data.get('collection_id', ''),
+                    'expiresAt': offer_data.get('expiresAt', datetime.now() + timedelta(days=7)),
+                    'image_url': listing_data.get('image_url', ''),
+                    'listingId': offer_data.get('listingId', ''),
+                    'offererRef': offer_data.get('offererRef', ''),
+                    'offerreference': offer_doc.id,
+                    'payment_due': offer_data.get('payment_due', datetime.now() + timedelta(days=3)),
+                    'status': offer_data.get('status', ''),
+                    'type': offer_data.get('type', 'cash')
+                }
+
+                all_offers.append(offer_obj)
+
+        logger.info(f"Retrieved {len(all_offers)} {offer_type} offers for user {user_id}")
+        return all_offers
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting {offer_type} offers for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get {offer_type} offers: {str(e)}")
+
+async def get_accepted_offers(user_id: str, offer_type: str, db_client: AsyncClient) -> List[Dict[str, Any]]:
+    """
+    Get all accepted offers for a specific user.
+
+    Args:
+        user_id: The ID of the user to get accepted offers for
+        offer_type: The type of offer to get (cash or point)
+        db_client: Firestore client
+
+    Returns:
+        List of accepted offers for the specified user
+
+    Raises:
+        HTTPException: If there's an error getting the accepted offers or if the user doesn't exist
+    """
+    logger = get_logger(__name__)
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Directly access the user's offers subcollection
+        subcollection_name = "my_cash_offers" if offer_type == "cash" else "my_point_offers"
+        offers_ref = user_ref.collection(subcollection_name)
+
+        accepted_offers = []
+        async for offer_doc in offers_ref.stream():
+            offer_data = offer_doc.to_dict()
+
+            # Check if this offer has 'accepted' status
+            if offer_data.get('status') == 'accepted':
+                # Get the listing details to include card information
+                listing_ref = db_client.collection('listings').document(offer_data.get('listingId', ''))
+                listing_doc = await listing_ref.get()
+
+                if listing_doc.exists:
+                    listing_data = listing_doc.to_dict()
+
+                    # Create the accepted offer object with all required fields
+                    accepted_offer = {
+                        'amount': offer_data.get('amount', 0),
+                        'at': offer_data.get('createdAt', datetime.now()),
+                        'card_reference': listing_data.get('card_reference', ''),
+                        'collection_id': listing_data.get('collection_id', ''),
+                        'expiresAt': offer_data.get('expiresAt', datetime.now() + timedelta(days=7)),
+                        'image_url': listing_data.get('image_url', ''),
+                        'listingId': offer_data.get('listingId', ''),
+                        'offererRef': offer_data.get('offererRef', ''),
+                        'offerreference': offer_doc.id,
+                        'payment_due': offer_data.get('payment_due', datetime.now() + timedelta(days=3)),
+                        'status': offer_data.get('status', 'accepted'),
+                        'type': offer_data.get('type', 'cash')
+                    }
+
+                    accepted_offers.append(accepted_offer)
+
+        logger.info(f"Retrieved {len(accepted_offers)} accepted {offer_type} offers for user {user_id}")
+        return accepted_offers
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting accepted {offer_type} offers for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get accepted {offer_type} offers: {str(e)}")

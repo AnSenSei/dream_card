@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Body, Request, Head
 from google.cloud import firestore
 from typing import Optional
 
-from models.payment_schemas import CreatePaymentIntentRequest, PaymentIntentResponse, WebhookResponse
-from service.payment_service import create_payment_intent, handle_stripe_webhook
+from models.payment_schemas import CreatePaymentIntentRequest, PaymentIntentResponse, WebhookResponse, RechargeHistoryResponse
+from service.payment_service import create_payment_intent, handle_stripe_webhook, get_user_recharge_history
 from config import get_firestore_client, get_logger
 
 logger = get_logger(__name__)
@@ -90,3 +90,29 @@ async def stripe_webhook_route(
             status_code=500, 
             detail="An error occurred while processing the webhook, Stripe should retry"
         )
+
+@router.get("/{user_id}/recharge-history", response_model=RechargeHistoryResponse)
+async def get_user_recharge_history_route(
+    user_id: str = Path(..., description="The ID of the user"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Get a user's recharge history and total amount recharged.
+
+    This endpoint:
+    1. Takes a user ID
+    2. Retrieves the user's total cash recharged from Firestore
+    3. Retrieves the user's recharge history from the cash_recharges table
+    4. Returns the combined information
+
+    The recharge history includes details about each transaction such as
+    amount, points granted, and timestamp.
+    """
+    try:
+        recharge_info = await get_user_recharge_history(user_id, db)
+        return RechargeHistoryResponse(**recharge_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving recharge history for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while retrieving the recharge history")

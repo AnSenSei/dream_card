@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     meta_data_collection: str = "collection_meta_data"
     quota_project_id: str = "seventh-program-433718-h8"
 
+    shippo_api_key: str
+
     # User backend service configuration
     user_backend_url: str = "http://localhost:8082/users/api/v1"
 

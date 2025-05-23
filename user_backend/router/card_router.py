@@ -1,9 +1,9 @@
 from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from google.cloud import firestore
 from pydantic import BaseModel
 
-from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse, WithdrawRequest, WithdrawRequestDetail
+from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse, WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse
 from service.user_service import (
     add_multiple_cards_to_user,
     draw_card_from_pack,
@@ -22,6 +22,7 @@ from service.user_service import (
     add_cards_and_deduct_points,
     get_all_withdraw_requests,
     get_withdraw_request_by_id,
+    get_user_pack_opening_history,
 )
 from config import get_firestore_client, get_logger
 
@@ -31,6 +32,7 @@ router = APIRouter(
     prefix="/users",
     tags=["cards"],
 )
+
 
 @router.post("/{user_id}/cards", response_model=dict, status_code=201)
 async def add_card_to_user_route(
@@ -280,12 +282,13 @@ async def withdraw_multiple_cards_route(
     """
     try:
         # Convert the CardToWithdraw objects to dictionaries
-        cards_to_withdraw = [{"card_id": card.card_id, "quantity": card.quantity} for card in withdraw_request.cards]
+        cards_to_withdraw = [{"card_id": card.card_id, "quantity": card.quantity, "subcollection_name": card.subcollection_name} for card in withdraw_request.cards]
 
         withdrawn_cards = await withdraw_ship_multiple_cards(
             user_id=user_id,
             cards_to_withdraw=cards_to_withdraw,
-            subcollection_name=withdraw_request.subcollection_name,
+            address_id=withdraw_request.address_id,
+            phone_number=withdraw_request.phone_number,
             db_client=db
         )
         return WithdrawCardsResponse(cards=withdrawn_cards)
@@ -602,3 +605,31 @@ async def get_withdraw_request_by_id_route(
     except Exception as e:
         logger.error(f"Error getting withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while retrieving the withdraw request")
+
+
+@router.get("/{user_id}/pack-opening-history", response_model=PackOpeningHistoryResponse)
+async def get_pack_opening_history_route(
+    user_id: str = Path(..., description="The ID of the user to get pack opening history for"),
+    page: int = Query(1, description="Page number (default: 1)"),
+    per_page: int = Query(10, description="Items per page (default: 10)")
+):
+    """
+    Get a user's pack opening history.
+
+    This endpoint:
+    1. Takes a user ID, page number, and items per page as arguments
+    2. Retrieves the user's pack opening history from the database
+    3. Returns the pack opening history with pagination information
+    """
+    try:
+        history = await get_user_pack_opening_history(
+            user_id=user_id,
+            page=page,
+            per_page=per_page
+        )
+        return history
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting pack opening history for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while getting the pack opening history")

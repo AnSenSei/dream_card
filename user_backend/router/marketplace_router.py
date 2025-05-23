@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Body
 from google.cloud import firestore
 from typing import List
 
-from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest
-from service.user_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer
+from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest, AcceptedOffersResponse, AllOffersResponse
+from service.user_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer, get_accepted_offers, get_all_offers
 from config import get_firestore_client, get_logger
 
 logger = get_logger(__name__)
@@ -379,3 +379,62 @@ async def accept_offer_route(
     except Exception as e:
         logger.error(f"Error accepting offer for listing: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while accepting the offer")
+
+@router.get("/{user_id}/my_offers/{offer_type}", response_model=AcceptedOffersResponse)
+async def get_accepted_offers_route(
+    user_id: str = Path(..., description="The ID of the user to get accepted offers for"),
+    offer_type: str = Path(..., description="The type of offer to get (cash or point)"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Get all accepted offers for a specific user.
+
+    This endpoint:
+    1. Takes a user ID and offer type as arguments
+    2. Retrieves all accepted offers of the specified type for the user
+    3. Returns a list of accepted offers with details including amount, timestamps, card reference, etc.
+    """
+    try:
+        accepted_offers = await get_accepted_offers(
+            user_id=user_id,
+            offer_type=offer_type,
+            db_client=db
+        )
+
+        # Convert the list of dictionaries to the response model
+        return AcceptedOffersResponse(offers=accepted_offers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting accepted offers: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while getting accepted offers")
+
+
+@router.get("/{user_id}/all_offers/{offer_type}", response_model=AllOffersResponse)
+async def get_all_offers_route(
+    user_id: str = Path(..., description="The ID of the user to get all offers for"),
+    offer_type: str = Path(..., description="The type of offer to get (cash or point)"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Get all offers for a specific user regardless of status.
+
+    This endpoint:
+    1. Takes a user ID and offer type as arguments
+    2. Retrieves all offers of the specified type for the user
+    3. Returns a list of offers with details including amount, timestamps, card reference, etc.
+    """
+    try:
+        all_offers = await get_all_offers(
+            user_id=user_id,
+            offer_type=offer_type,
+            db_client=db
+        )
+
+        # Convert the list of dictionaries to the response model
+        return AllOffersResponse(offers=all_offers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting all offers: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while getting all offers")
