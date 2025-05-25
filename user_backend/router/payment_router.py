@@ -35,7 +35,8 @@ async def create_payment_intent_route(
             amount=request.amount,
             currency=request.currency,
             metadata=request.metadata,
-            db_client=db
+            db_client=db,
+            refer_code=request.refer_code
         )
 
         # Convert to response model
@@ -69,7 +70,7 @@ async def stripe_webhook_route(
     5. Records the transaction in the database
 
     The webhook URL should be configured in the Stripe dashboard to point to this endpoint.
-    
+
     Stripe will retry webhooks that receive a 5xx response up to 3 times with exponential backoff.
     We deliberately return 500 status when we want Stripe to retry (e.g., if user points addition fails).
     """

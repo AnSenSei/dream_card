@@ -9,6 +9,7 @@ class CreatePaymentIntentRequest(BaseModel):
     amount: int = Field(..., description="Amount to charge in cents (e.g., 1000 for $10.00)")
     currency: str = Field("usd", description="Currency code (default: usd)")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata for the payment intent")
+    refer_code: Optional[str] = Field(None, description="Optional referral code to apply to this payment")
 
 class PaymentIntentResponse(BaseModel):
     """

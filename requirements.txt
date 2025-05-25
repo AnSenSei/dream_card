@@ -1,0 +1,9 @@
+click
+google-cloud-storage
+pip
+protobuf
+pyyaml
+requests
+shippo>=3.0.0
+six
+wrapt

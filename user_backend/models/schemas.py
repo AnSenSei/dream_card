@@ -34,6 +34,8 @@ class User(BaseModel):
     totalPointsSpent: int = 0
     totalFusion: int = 0  # Added new field
     clientSeed: Optional[str] = None  # Client seed for randomization
+    referred_by: Optional[str] = None  # ID of the user who referred this user
+    total_point_refered: int = 0  # Total points earned through referrals
 
     class Config:
         from_attributes = True
@@ -132,6 +134,30 @@ class PerformFusionResponse(BaseModel):
     success: bool
     message: str
     result_card: Optional[UserCard] = None
+
+class CheckReferResponse(BaseModel):
+    """Response model for checking if a user has been referred"""
+    user_id: str
+    is_referred: bool
+    referer_id: Optional[str] = None
+
+class ReferredUser(BaseModel):
+    """Model for a user who has been referred"""
+    user_id: str
+    points_recharged: int
+    first_recharge_at: datetime
+    last_recharge_at: datetime
+
+class GetReferralsResponse(BaseModel):
+    """Response model for getting all users referred by a specific user"""
+    user_id: str
+    total_referred: int
+    referred_users: List[ReferredUser] = []
+
+class GetReferCodeResponse(BaseModel):
+    """Response model for getting a user's referral code"""
+    user_id: str
+    refer_code: str
 
 class RandomFusionRequest(BaseModel):
     """Request model for performing random fusion"""
@@ -320,6 +346,11 @@ class PackOpeningHistory(BaseModel):
 class PackOpeningHistoryResponse(BaseModel):
     pack_openings: List[PackOpeningHistory]
     total_count: int
+
+class WithdrawRequestsResponse(BaseModel):
+    """Response model for listing withdraw requests with pagination"""
+    withdraw_requests: List[WithdrawRequest]
+    pagination: PaginationInfo
 
 # Note: For file uploads, we don't use a Pydantic model
 # The avatar upload endpoint will use FastAPI's File and UploadFile directly

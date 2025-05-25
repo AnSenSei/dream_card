@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 from google.cloud import firestore
 from pydantic import BaseModel
 
-from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse, WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse
+from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse, WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse, WithdrawRequestsResponse
 from service.user_service import (
     add_multiple_cards_to_user,
     draw_card_from_pack,
@@ -23,6 +23,7 @@ from service.user_service import (
     get_all_withdraw_requests,
     get_withdraw_request_by_id,
     get_user_pack_opening_history,
+    add_to_top_hits,
 )
 from config import get_firestore_client, get_logger
 
@@ -421,6 +422,41 @@ async def delete_card_from_highlights_route(
         logger.error(f"Error deleting card from highlights for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while deleting the card from highlights")
 
+class TopHitsRequest(BaseModel):
+    """Request model for adding a card to top hits"""
+    user_id: str
+    display_name: str
+    card_reference: str
+
+@router.post("/top_hits", response_model=dict)
+async def add_to_top_hits_route(
+    request: TopHitsRequest = Body(..., description="Request body containing user_id, display_name, and card_reference"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Add a card to the top_hits collection.
+
+    This endpoint:
+    1. Takes user_id, display_name, and card_reference in the request body
+    2. Parses the card_reference to get collection_id and card_id
+    3. Fetches the card details from the master collection
+    4. Creates a document in the top_hits collection with the required structure
+    5. Returns a success message and the document ID
+    """
+    try:
+        result = await add_to_top_hits(
+            user_id=request.user_id,
+            display_name=request.display_name,
+            card_reference=request.card_reference,
+            db_client=db
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding card to top_hits: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while adding the card to top_hits")
+
 # @router.post("/{user_id}/fusion", response_model=PerformFusionResponse)
 # async def perform_fusion_route(
 #     user_id: str = Path(..., description="The ID of the user performing the fusion"),
@@ -547,26 +583,35 @@ async def check_missing_cards_route(
         raise HTTPException(status_code=500, detail="An error occurred while checking missing cards")
 
 
-@router.get("/{user_id}/withdraw-requests", response_model=List[WithdrawRequest])
+@router.get("/{user_id}/withdraw-requests", response_model=WithdrawRequestsResponse)
 async def get_all_withdraw_requests_route(
     user_id: str = Path(..., description="The ID of the user to get withdraw requests for"),
+    page: int = Query(1, description="Page number (default: 1)"),
+    per_page: int = Query(10, description="Items per page (default: 10)"),
+    sort_by: str = Query("created_at", description="Field to sort by (default: created_at)"),
+    sort_order: str = Query("desc", description="Sort order (asc or desc, default: desc)"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
-    List all withdraw requests for a specific user.
+    List all withdraw requests for a specific user with pagination.
 
     This endpoint:
     1. Takes a user ID as a path parameter
-    2. Retrieves all withdraw requests for that user
-    3. Returns a list of withdraw requests with the following fields:
-       - created_at: timestamp when the request was created
-       - request_date: timestamp when the request was made
-       - status: string indicating the status of the request (e.g., 'pending')
-       - user_id: string identifying the user who made the request
+    2. Supports pagination with page and per_page query parameters
+    3. Supports sorting with sort_by and sort_order query parameters
+    4. Retrieves withdraw requests for the user with pagination and sorting
+    5. Returns a response with withdraw requests and pagination information
     """
     try:
-        withdraw_requests = await get_all_withdraw_requests(user_id=user_id, db_client=db)
-        return withdraw_requests
+        withdraw_requests_response = await get_all_withdraw_requests(
+            user_id=user_id, 
+            db_client=db,
+            page=page,
+            per_page=per_page,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
+        return withdraw_requests_response
     except HTTPException:
         raise
     except Exception as e:

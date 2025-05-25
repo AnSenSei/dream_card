@@ -1,7 +1,7 @@
 from typing import Dict, Any, Optional, Tuple
 from fastapi import HTTPException, Request
 import stripe
-from google.cloud.firestore_v1 import AsyncClient
+from google.cloud.firestore_v1 import AsyncClient, Increment as firestore_Increment
 import json
 from datetime import datetime
 
@@ -75,7 +75,8 @@ async def create_payment_intent(
     amount: int,
     currency: str = "usd",
     metadata: Optional[Dict[str, Any]] = None,
-    db_client: AsyncClient = None
+    db_client: AsyncClient = None,
+    refer_code: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Create a payment intent using Stripe.
@@ -86,6 +87,7 @@ async def create_payment_intent(
         currency: The currency to use (default: usd)
         metadata: Additional metadata to attach to the payment intent
         db_client: Firestore client (optional, for future use)
+        refer_code: Optional referral code to apply to this payment
 
     Returns:
         Dict containing the payment intent details including client_secret
@@ -106,6 +108,28 @@ async def create_payment_intent(
         payment_metadata = {"user_id": user_id}
         if metadata:
             payment_metadata.update(metadata)
+
+        # Process referral code if provided
+        if refer_code and db_client:
+            try:
+                # Look up the referral code in the refer_codes collection
+                refer_code_ref = db_client.collection('refer_codes').document(refer_code)
+                refer_code_doc = await refer_code_ref.get()
+
+                if refer_code_doc.exists:
+                    refer_code_data = refer_code_doc.to_dict()
+                    referer_id = refer_code_data.get('referer_id')
+
+                    # Add referral information to payment metadata
+                    payment_metadata["refer_code"] = refer_code
+                    payment_metadata["referer_id"] = referer_id
+
+                    logger.info(f"Applied referral code {refer_code} from user {referer_id} to payment for user {user_id}")
+                else:
+                    logger.warning(f"Invalid referral code {refer_code} provided for payment by user {user_id}")
+            except Exception as e:
+                logger.error(f"Error processing referral code {refer_code}: {str(e)}", exc_info=True)
+                # Continue with payment even if referral code processing fails
 
         # Create the payment intent
         payment_intent = stripe.PaymentIntent.create(
@@ -238,13 +262,13 @@ async def get_user_recharge_history(user_id: str, db_client: AsyncClient) -> Dic
             raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
 
         user_data = user_doc.to_dict()
-        
+
         # Get total amount recharged from Firestore
         total_cash_recharged = user_data.get("totalCashRecharged", 0)
-        
+
         # Query the cash_recharges table in PostgreSQL
         from config.db_connection import db_connection
-        
+
         recharge_history = []
         with db_connection() as conn:
             cursor = conn.cursor()
@@ -258,13 +282,13 @@ async def get_user_recharge_history(user_id: str, db_client: AsyncClient) -> Dic
                     """,
                     (user_id,)
                 )
-                
+
                 # Convert query results to a list of dictionaries
                 recharge_records = cursor.fetchall()
-                
+
                 # Get column names
                 column_names = [desc[0] for desc in cursor.description]
-                
+
                 # Create list of dictionaries from results
                 for record in recharge_records:
                     recharge_dict = dict(zip(column_names, record))
@@ -272,7 +296,7 @@ async def get_user_recharge_history(user_id: str, db_client: AsyncClient) -> Dic
                     if 'created_at' in recharge_dict and recharge_dict['created_at']:
                         recharge_dict['created_at'] = recharge_dict['created_at'].isoformat()
                     recharge_history.append(recharge_dict)
-                
+
             except Exception as db_error:
                 logger.error(f"Database error when fetching recharge history for user {user_id}: {str(db_error)}")
                 raise HTTPException(
@@ -281,14 +305,14 @@ async def get_user_recharge_history(user_id: str, db_client: AsyncClient) -> Dic
                 )
             finally:
                 cursor.close()
-        
+
         # Return the user's recharge information
         return {
             "user_id": user_id,
             "total_cash_recharged": total_cash_recharged,
             "recharge_history": recharge_history
         }
-        
+
     except HTTPException:
         # Re-raise HTTP exceptions
         raise
@@ -331,18 +355,97 @@ async def handle_payment_succeeded(payment_intent: Dict[str, Any], db_client: As
         # Calculate points to add (e.g., $1 = 100 points)
         points_to_add = int(amount * POINTS_PER_DOLLAR / 100)  # Convert cents to points
 
-        # Try to add points to user and update totalCashRecharged - wrap this in its own try block to handle separately
-        try:
-            # Add points to user and update totalCashRecharged
-            updated_user = await add_points_and_update_cash_recharged(user_id, points_to_add, amount_dollars, db_client)
-            logger.info(f"Successfully added {points_to_add} points to user {user_id} and updated totalCashRecharged")
-        except Exception as points_error:
-            logger.error(f"Failed to update user {user_id}: {str(points_error)}", exc_info=True)
-            # Return a 500 status code which will cause Stripe to retry the webhook
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Failed to update user, Stripe should retry this webhook: {str(points_error)}"
-            )
+        # Check if this payment has referral information
+        referer_id = metadata.get('referer_id')
+        refer_code = metadata.get('refer_code')
+
+        # Apply referral bonus if applicable
+        if referer_id and refer_code:
+            # Give the referred user (current user) 5% more points
+            referral_bonus = int(points_to_add * 0.05)
+            original_points = points_to_add
+            points_to_add += referral_bonus
+
+            logger.info(f"User {user_id} was referred by {referer_id}. Adding 5% bonus: {referral_bonus} extra points")
+
+            # Calculate points for the referrer (5% of the original points granted to the new user)
+            referrer_points = int(original_points * 0.05)
+
+            # Try to add points to user and update totalCashRecharged - wrap this in its own try block to handle separately
+            try:
+                # Add points to user and update totalCashRecharged
+                updated_user = await add_points_and_update_cash_recharged(user_id, points_to_add, amount_dollars, db_client)
+                logger.info(f"Successfully added {points_to_add} points to user {user_id} and updated totalCashRecharged")
+
+                # Update the user's referred_by field if not already set
+                user_ref = db_client.collection("users").document(user_id)
+                user_doc = await user_ref.get()
+                user_data = user_doc.to_dict()
+
+                if not user_data.get('referred_by'):
+                    await user_ref.update({
+                        "referred_by": referer_id
+                    })
+                    logger.info(f"Updated user {user_id} with referred_by: {referer_id}")
+
+                # Add points to the referrer
+                try:
+                    await add_points_to_user(referer_id, referrer_points, db_client)
+                    logger.info(f"Added {referrer_points} points to referrer {referer_id}")
+
+                    # Add the new user's ID and recharged points to the referrer's refers subcollection
+                    referrer_ref = db_client.collection("users").document(referer_id)
+                    refers_ref = referrer_ref.collection("refers").document(user_id)
+
+                    # Check if the document already exists
+                    refers_doc = await refers_ref.get()
+
+                    if refers_doc.exists:
+                        # Update existing document
+                        await refers_ref.update({
+                            "points_recharged": firestore_Increment(original_points),
+                            "last_recharge_at": datetime.now()
+                        })
+                    else:
+                        # Create new document
+                        await refers_ref.set({
+                            "user_id": user_id,
+                            "points_recharged": original_points,
+                            "first_recharge_at": datetime.now(),
+                            "last_recharge_at": datetime.now()
+                        })
+
+                    # Update the total_point_refered field for the referrer
+                    await referrer_ref.update({
+                        "total_point_refered": firestore_Increment(original_points)
+                    })
+
+                    logger.info(f"Updated referrer {referer_id}'s refers collection with user {user_id} and incremented total_point_refered by {original_points}")
+
+                except Exception as referrer_error:
+                    logger.error(f"Failed to update referrer {referer_id}: {str(referrer_error)}", exc_info=True)
+                    # Continue processing even if updating the referrer fails
+
+            except Exception as points_error:
+                logger.error(f"Failed to update user {user_id}: {str(points_error)}", exc_info=True)
+                # Return a 500 status code which will cause Stripe to retry the webhook
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Failed to update user, Stripe should retry this webhook: {str(points_error)}"
+                )
+        else:
+            # No referral - normal flow
+            try:
+                # Add points to user and update totalCashRecharged
+                updated_user = await add_points_and_update_cash_recharged(user_id, points_to_add, amount_dollars, db_client)
+                logger.info(f"Successfully added {points_to_add} points to user {user_id} and updated totalCashRecharged")
+            except Exception as points_error:
+                logger.error(f"Failed to update user {user_id}: {str(points_error)}", exc_info=True)
+                # Return a 500 status code which will cause Stripe to retry the webhook
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Failed to update user, Stripe should retry this webhook: {str(points_error)}"
+                )
 
         # Import needed modules for transaction management
         from config.db_connection import db_connection

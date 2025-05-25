@@ -18,7 +18,7 @@ from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_trans
 
 from config import get_logger, settings
 from config.db_connection import db_connection
-from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CheckCardMissingResponse, MissingCard, FusionRecipeMissingCards, RankEntry, WithdrawRequest, WithdrawRequestDetail
+from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CheckCardMissingResponse, MissingCard, FusionRecipeMissingCards, RankEntry, WithdrawRequest, WithdrawRequestDetail, WithdrawRequestsResponse
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs, parse_base64_image
 
 logger = get_logger(__name__)
@@ -192,6 +192,134 @@ async def get_card_by_id_from_service(card_id: str, collection_name: str = None)
             status_code=503,
             detail=f"Service unavailable: Could not connect to storage service"
         )
+
+async def check_user_referred(user_id: str, db_client: AsyncClient) -> Dict[str, Any]:
+    """
+    Check if a user has been referred (has the referred_by field).
+
+    Args:
+        user_id: The ID of the user to check
+        db_client: Firestore client
+
+    Returns:
+        Dict containing user_id, is_referred status, and referer_id if referred
+
+    Raises:
+        HTTPException: If there's an error checking the user
+    """
+    try:
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        user_data = user_doc.to_dict()
+        is_referred = 'referred_by' in user_data and user_data['referred_by'] is not None
+        referer_id = user_data.get('referred_by') if is_referred else None
+
+        return {
+            "user_id": user_id,
+            "is_referred": is_referred,
+            "referer_id": referer_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking if user {user_id} has been referred: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to check user referral status: {str(e)}")
+
+async def get_user_referrals(user_id: str, db_client: AsyncClient) -> Dict[str, Any]:
+    """
+    Get all users referred by a specific user.
+
+    Args:
+        user_id: The ID of the user to get referrals for
+        db_client: Firestore client
+
+    Returns:
+        Dict containing user_id, total_referred, and a list of referred users
+
+    Raises:
+        HTTPException: If there's an error getting the referrals
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get all documents from the user's "refers" subcollection
+        refers_ref = user_ref.collection("refers")
+        refers_docs = await refers_ref.get()
+
+        referred_users = []
+        for doc in refers_docs:
+            referred_user_data = doc.to_dict()
+            referred_users.append({
+                "user_id": doc.id,
+                "points_recharged": referred_user_data.get("points_recharged", 0),
+                "first_recharge_at": referred_user_data.get("first_recharge_at"),
+                "last_recharge_at": referred_user_data.get("last_recharge_at")
+            })
+
+        return {
+            "user_id": user_id,
+            "total_referred": len(referred_users),
+            "referred_users": referred_users
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting referrals for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get user referrals: {str(e)}")
+
+async def get_user_refer_code(user_id: str, db_client: AsyncClient) -> Dict[str, Any]:
+    """
+    Get a user's referral code.
+
+    Args:
+        user_id: The ID of the user to get the referral code for
+        db_client: Firestore client
+
+    Returns:
+        Dict containing user_id and refer_code
+
+    Raises:
+        HTTPException: If there's an error getting the referral code
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Query the refer_codes collection where referer_id equals the user_id
+        refer_codes_ref = db_client.collection('refer_codes')
+        query = refer_codes_ref.where('referer_id', '==', user_id)
+        refer_codes_docs = await query.get()
+
+        # If no referral code is found, return an error
+        if not refer_codes_docs:
+            raise HTTPException(status_code=404, detail=f"No referral code found for user with ID {user_id}")
+
+        # Get the first document (there should only be one)
+        refer_code_doc = refer_codes_docs[0]
+        refer_code = refer_code_doc.id
+
+        return {
+            "user_id": user_id,
+            "refer_code": refer_code
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting referral code for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get user referral code: {str(e)}")
 
 async def get_user_by_id(user_id: str, db_client: AsyncClient) -> Optional[User]:
     """
@@ -1675,7 +1803,8 @@ async def create_account(request: CreateAccountRequest, db_client: AsyncClient, 
             "totalCashRecharged": 0,
             "totalPointsSpent": 0,
             "totalFusion": request.totalFusion,
-            "clientSeed": clientSeed
+            "clientSeed": clientSeed,
+            "total_point_refered": 0
         }
 
         # Create user document in Firestore
@@ -2581,6 +2710,77 @@ async def add_card_to_highlights(
     except Exception as e:
         logger.error(f"Error adding card {card_id} from collection {card_collection_id} to highlights for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to add card to highlights: {str(e)}")
+
+async def add_to_top_hits(
+    user_id: str,
+    display_name: str,
+    card_reference: str,
+    db_client: AsyncClient
+) -> dict:
+    """
+    Add a card to the top_hits collection.
+    This function creates a document in the top_hits collection with user and card information.
+
+    Args:
+        user_id: The ID of the user
+        display_name: The display name of the user
+        card_reference: Reference to master card ("collection/card_id")
+        db_client: Firestore client
+
+    Returns:
+        A dictionary with the created document data
+
+    Raises:
+        HTTPException: If there's an error adding the card to top_hits
+    """
+    try:
+        # Parse card_reference
+        try:
+            collection_id, card_id = card_reference.split('/')
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail=f"Invalid card reference format: {card_reference}. "
+                                       "Expected 'collection/card_id'.")
+
+        # Fetch master card data
+        card_ref = db_client.collection(collection_id).document(card_id)
+        card_doc = await card_ref.get()
+        if not card_doc.exists:
+            raise HTTPException(status_code=404,
+                                detail=f"Card '{card_reference}' not found")
+        card_data = card_doc.to_dict()
+
+        # Prepare the document data
+        top_hit_data = {
+            "user_id": user_id,
+            "display_name": display_name,
+            "card": {
+                "id": card_id,
+                "name": card_data.get("card_name", ""),
+                "rarity": card_data.get("rarity", 1),
+                "image_url": card_data.get("image_url", "")
+            },
+            "timestamp": SERVER_TIMESTAMP
+        }
+
+        # Add the document to the top_hits collection
+        top_hits_ref = db_client.collection('top_hits').document()
+        await top_hits_ref.set(top_hit_data)
+
+        logger.info(f"Added card {card_id} from collection {collection_id} to top_hits for user {user_id}")
+
+        # Return the created document data
+        return {
+            "success": True,
+            "message": f"Card {card_id} added to top_hits successfully",
+            "document_id": top_hits_ref.id
+        }
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error adding card {card_reference} to top_hits for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add card to top_hits: {str(e)}")
 
 async def delete_card_from_highlights(
     user_id: str,
@@ -4451,16 +4651,20 @@ async def update_user_avatar(user_id: str, avatar: bytes, content_type: str, db_
         raise HTTPException(status_code=500, detail=f"Failed to update avatar: {str(e)}")
 
 
-async def get_all_withdraw_requests(user_id: str, db_client: AsyncClient) -> List[WithdrawRequest]:
+async def get_all_withdraw_requests(user_id: str, db_client: AsyncClient, page: int = 1, per_page: int = 10, sort_by: str = "created_at", sort_order: str = "desc") -> WithdrawRequestsResponse:
     """
-    Get all withdraw requests for a specific user.
+    Get all withdraw requests for a specific user with pagination.
 
     Args:
         user_id: The ID of the user to get withdraw requests for
         db_client: Firestore client
+        page: The page number to get (default: 1)
+        per_page: The number of items per page (default: 10)
+        sort_by: The field to sort by (default: "created_at")
+        sort_order: The sort order ("asc" or "desc", default: "desc")
 
     Returns:
-        List of WithdrawRequest objects for the specified user
+        WithdrawRequestsResponse object containing the withdraw requests and pagination info
 
     Raises:
         HTTPException: If there's an error getting the withdraw requests or if the user doesn't exist
@@ -4475,7 +4679,50 @@ async def get_all_withdraw_requests(user_id: str, db_client: AsyncClient) -> Lis
 
         # Get withdraw requests for this user
         withdraw_requests_ref = user_ref.collection('withdraw_requests')
-        withdraw_requests = await withdraw_requests_ref.get()
+
+        # Create the base query
+        query = withdraw_requests_ref
+
+        # Count total items
+        count_agg_query = query.count()
+        count_snapshot = await count_agg_query.get()
+        total_items = count_snapshot[0][0].value if count_snapshot and count_snapshot[0] else 0
+
+        if total_items == 0:
+            logger.info(f"No withdraw requests found for user {user_id}")
+            return WithdrawRequestsResponse(
+                withdraw_requests=[],
+                pagination=PaginationInfo(
+                    total_items=0,
+                    items_per_page=per_page,
+                    current_page=page,
+                    total_pages=0
+                )
+            )
+
+        # Determine sort direction
+        if sort_order.lower() == "desc":
+            direction = firestore.Query.DESCENDING
+        elif sort_order.lower() == "asc":
+            direction = firestore.Query.ASCENDING
+        else:
+            logger.warning(f"Invalid sort_order '{sort_order}'. Defaulting to DESCENDING.")
+            direction = firestore.Query.DESCENDING
+            sort_order = "desc"  # Ensure applied filter reflects actual sort
+
+        # Apply sorting
+        query_with_sort = query.order_by(sort_by, direction=direction)
+
+        # Apply pagination
+        current_page_query = max(1, page)
+        per_page_query = max(1, per_page)
+        offset = (current_page_query - 1) * per_page_query
+
+        paginated_query = query_with_sort.limit(per_page_query).offset(offset)
+
+        # Execute the query
+        logger.info(f"Executing Firestore query for withdraw requests for user {user_id} with pagination and sorting")
+        withdraw_requests = await paginated_query.get()
 
         user_withdraw_requests = []
 
@@ -4488,12 +4735,35 @@ async def get_all_withdraw_requests(user_id: str, db_client: AsyncClient) -> Lis
                 request_date=request_data.get('request_date'),
                 status=request_data.get('status', 'pending'),
                 user_id=request_data.get('user_id', user_id),
-                card_count=request_data.get('card_count')
+                card_count=request_data.get('card_count'),
+                shipping_address=request_data.get('shipping_address'),
+                shippo_address_id=request_data.get('shippo_address_id'),
+                shippo_parcel_id=request_data.get('shippo_parcel_id'),
+                shippo_shipment_id=request_data.get('shippo_shipment_id'),
+                shippo_transaction_id=request_data.get('shippo_transaction_id'),
+                shippo_label_url=request_data.get('shippo_label_url'),
+                tracking_number=request_data.get('tracking_number'),
+                tracking_url=request_data.get('tracking_url'),
+                shipping_status=request_data.get('shipping_status')
             )
             user_withdraw_requests.append(withdraw_request)
 
-        logger.info(f"Retrieved {len(user_withdraw_requests)} withdraw requests for user {user_id}")
-        return user_withdraw_requests
+        # Calculate total pages
+        total_pages = math.ceil(total_items / per_page_query)
+
+        # Create and return the response
+        response = WithdrawRequestsResponse(
+            withdraw_requests=user_withdraw_requests,
+            pagination=PaginationInfo(
+                total_items=total_items,
+                items_per_page=per_page_query,
+                current_page=current_page_query,
+                total_pages=total_pages
+            )
+        )
+
+        logger.info(f"Retrieved {len(user_withdraw_requests)} withdraw requests for user {user_id} (page {current_page_query} of {total_pages})")
+        return response
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -4504,6 +4774,7 @@ async def get_all_withdraw_requests(user_id: str, db_client: AsyncClient) -> Lis
 async def get_withdraw_request_by_id(request_id: str, user_id: str, db_client: AsyncClient) -> WithdrawRequestDetail:
     """
     Get a specific withdraw request by ID.
+    This function also checks the status of the shipment with the Shippo API and updates the status in Firestore.
 
     Args:
         request_id: The ID of the withdraw request to get
@@ -4534,6 +4805,57 @@ async def get_withdraw_request_by_id(request_id: str, user_id: str, db_client: A
         # Get the withdraw request data
         withdraw_request_data = withdraw_request_doc.to_dict()
 
+        # Check if the withdraw request has a Shippo transaction ID
+        shippo_transaction_id = withdraw_request_data.get('shippo_transaction_id')
+        if shippo_transaction_id:
+            # Initialize the Shippo SDK with API key
+            if not hasattr(settings, 'shippo_api_key') or not settings.shippo_api_key:
+                logger.error("Shippo API key not configured")
+                raise HTTPException(status_code=500, detail="Shipping service not configured")
+
+            shippo_sdk = Shippo(
+                api_key_header=settings.shippo_api_key
+            )
+
+            try:
+                # Retrieve the transaction from Shippo
+                shippo_transaction = shippo_sdk.transactions.get(shippo_transaction_id)
+
+                # Get the current status from Shippo
+                current_status = shippo_transaction.status
+
+                # Map Shippo status to our shipping_status
+                shipping_status_map = {
+                    'QUEUED': 'label_created',
+                    'WAITING': 'label_created',
+                    'PROCESSING': 'label_created',
+                    'SUCCESS': 'label_created',
+                    'ERROR': 'error',
+                    'DELIVERED': 'delivered',
+                    'TRANSIT': 'shipped',
+                    'FAILURE': 'error',
+                    'RETURNED': 'returned',
+                    'UNKNOWN': 'unknown'
+                }
+
+                # Get the current shipping_status from Firestore
+                current_shipping_status = withdraw_request_data.get('shipping_status', 'pending')
+
+                # Map the Shippo status to our shipping_status
+                new_shipping_status = shipping_status_map.get(current_status, current_shipping_status)
+
+                # Update the shipping_status in Firestore if it has changed
+                if new_shipping_status != current_shipping_status:
+                    await withdraw_request_ref.update({
+                        'shipping_status': new_shipping_status
+                    })
+                    withdraw_request_data['shipping_status'] = new_shipping_status
+                    logger.info(f"Updated shipping status for withdraw request {request_id} from {current_shipping_status} to {new_shipping_status}")
+            except Exception as e:
+                logger.error(f"Error checking shipment status for withdraw request {request_id}: {e}", exc_info=True)
+                # Don't raise an exception here, just log the error and continue
+                # The withdraw request can still be returned with its current status
+
         # Get the cards in the withdraw request
         cards_ref = withdraw_request_ref.collection('cards')
         cards_docs = await cards_ref.get()
@@ -4552,7 +4874,16 @@ async def get_withdraw_request_by_id(request_id: str, user_id: str, db_client: A
             status=withdraw_request_data.get('status', 'pending'),
             user_id=withdraw_request_data.get('user_id', user_id),
             card_count=withdraw_request_data.get('card_count', len(cards)),
-            cards=cards
+            cards=cards,
+            shipping_address=withdraw_request_data.get('shipping_address'),
+            shippo_address_id=withdraw_request_data.get('shippo_address_id'),
+            shippo_parcel_id=withdraw_request_data.get('shippo_parcel_id'),
+            shippo_shipment_id=withdraw_request_data.get('shippo_shipment_id'),
+            shippo_transaction_id=withdraw_request_data.get('shippo_transaction_id'),
+            shippo_label_url=withdraw_request_data.get('shippo_label_url'),
+            tracking_number=withdraw_request_data.get('tracking_number'),
+            tracking_url=withdraw_request_data.get('tracking_url'),
+            shipping_status=withdraw_request_data.get('shipping_status')
         )
 
         logger.info(f"Retrieved withdraw request {request_id} for user {user_id} with {len(cards)} cards")
