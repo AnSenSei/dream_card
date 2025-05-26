@@ -4,7 +4,7 @@ from google.cloud import firestore
 from datetime import datetime, timedelta
 
 from models.schemas import RankEntry
-from service.user_service import get_weekly_spending_rank
+from service.rank_service import get_weekly_spending_rank
 from config import get_firestore_client, get_logger
 
 logger = get_logger(__name__)

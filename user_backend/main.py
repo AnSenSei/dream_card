@@ -8,6 +8,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from config import get_logger, instrument_app, settings, test_connection, close_connector
 from router import account_router, card_router, marketplace_router, rank_router, payment_router
+from router.marketplace_router import listings_router
 from service.payment_service import ensure_payment_tables_exist
 
 # Configure logging with structured logger
@@ -94,6 +95,9 @@ logger.info("Card router included in the sub-API.")
 
 api_v1.include_router(marketplace_router.router)
 logger.info("Marketplace router included in the sub-API.")
+
+api_v1.include_router(listings_router)
+logger.info("Listings router included in the sub-API.")
 
 api_v1.include_router(rank_router.router)
 logger.info("Rank router included in the sub-API.")

@@ -3,7 +3,7 @@ from typing import Optional, List
 from google.cloud import firestore
 
 from models.schemas import User, Address, CreateAccountRequest, UserEmailAddressUpdate, AddPointsRequest, CheckReferResponse, GetReferralsResponse, GetReferCodeResponse
-from service.user_service import (
+from service.account_service import (
     get_user_by_id,
     update_user_email_and_address,
     add_user_address,

@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Body
 from google.cloud import firestore
 from typing import List
 
-from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest, AcceptedOffersResponse, AllOffersResponse
-from service.user_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer, get_accepted_offers, get_all_offers
+from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest, AcceptedOffersResponse, AllOffersResponse, PayPointOfferRequest
+from service.marketplace_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer, get_accepted_offers, get_all_offers, pay_point_offer, get_all_listings
 from config import get_firestore_client, get_logger
 
 logger = get_logger(__name__)
@@ -438,3 +438,80 @@ async def get_all_offers_route(
     except Exception as e:
         logger.error(f"Error getting all offers: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while getting all offers")
+
+
+# Create a separate router for endpoints that don't require a user_id
+listings_router = APIRouter(
+    tags=["marketplace"],
+)
+
+@listings_router.get("/listings", response_model=List[CardListing])
+async def get_all_listings_route(
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Get all listings in the marketplace.
+
+    This endpoint:
+    1. Retrieves all listings from the marketplace
+    2. Returns a list of all listings with their details
+    """
+    try:
+        listings = await get_all_listings(db_client=db)
+        return listings
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting all listings: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while getting all listings")
+
+@router.post("/{user_id}/listings/{listing_id}/offers/{offer_id}/pay")
+async def pay_point_offer_route(
+    user_id: str = Path(..., description="The ID of the user paying for the offer (must be the offer creator)"),
+    listing_id: str = Path(..., description="The ID of the listing"),
+    offer_id: str = Path(..., description="The ID of the offer to pay"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Pay for a point offer, which will:
+    1. Deduct points from the user's account
+    2. Add points to the seller's account
+    3. Add the card to the user's collection
+    4. Deduct quantity from the listing
+    5. Delete the listing if quantity becomes zero
+    6. Deduct locked_quantity from the seller's card
+    7. Delete the seller's card if both quantity and locked_quantity are zero
+    8. Insert data into the marketplace_transactions Firestore collection
+    9. Insert data into the marketplace_transactions SQL table
+    10. Delete the user's offer from their my_point_offers collection
+
+    This endpoint:
+    1. Takes a user ID, listing ID, and offer ID as arguments
+    2. Verifies the user exists and is the offer creator
+    3. Verifies the listing exists
+    4. Verifies the offer exists
+    5. Verifies the user has enough points
+    6. Deducts points from the user
+    7. Adds points to the seller
+    8. Adds the card to the user's collection
+    9. Deducts quantity from the listing (or deletes it if quantity becomes zero)
+    10. Deducts locked_quantity from the seller's card
+    11. Deletes the seller's card if both quantity and locked_quantity are zero
+    12. Inserts data into the marketplace_transactions Firestore collection
+    13. Inserts data into the marketplace_transactions SQL table
+    14. Deletes the user's offer from their my_point_offers collection
+    15. Returns a success message with details
+    """
+    try:
+        result = await pay_point_offer(
+            user_id=user_id,
+            listing_id=listing_id,
+            offer_id=offer_id,
+            db_client=db
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error paying for point offer: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while paying for the point offer")

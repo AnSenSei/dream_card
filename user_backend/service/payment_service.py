@@ -1,13 +1,16 @@
 from typing import Dict, Any, Optional, Tuple
 from fastapi import HTTPException, Request
 import stripe
-from google.cloud.firestore_v1 import AsyncClient, Increment as firestore_Increment
+from google.cloud import firestore
+from google.cloud.firestore_v1 import AsyncClient, Increment as firestore_Increment, async_transactional
 import json
 from datetime import datetime
 
 from config import get_logger, settings, execute_query
-from service.user_service import add_points_to_user, add_points_and_update_cash_recharged
-from config.db_connection import test_connection
+from service.card_service import add_card_to_user
+from service.account_service import add_points_to_user,add_points_and_update_cash_recharged
+from config.db_connection import test_connection, db_connection
+
 
 # Initialize Stripe with the API key from settings
 stripe.api_key = settings.stripe_api_key
@@ -168,6 +171,136 @@ async def create_payment_intent(
         logger.error(f"Error in create_payment_intent: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
+
+async def create_marketplace_intent(
+    user_id: str,
+    offer_id: str,
+    listing_id: str,
+    buyer_address_id: str,
+    db_client: AsyncClient = None
+) -> Dict[str, Any]:
+    """
+    Create a marketplace payment intent using Stripe Connect.
+
+    Args:
+        user_id: The ID of the user making the payment (buyer)
+        offer_id: The ID of the offer
+        listing_id: The ID of the listing
+        buyer_address_id: The ID of the buyer's address
+        db_client: Firestore client
+
+    Returns:
+        Dict containing the payment intent details including client_secret
+
+    Raises:
+        HTTPException: If there's an error creating the payment intent
+    """
+    try:
+        # Get the buyer to ensure they exist
+        if not db_client:
+            raise HTTPException(status_code=500, detail="Database client is required")
+
+        buyer_ref = db_client.collection("users").document(user_id)
+        buyer_doc = await buyer_ref.get()
+
+        if not buyer_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Buyer with ID {user_id} not found")
+
+        buyer_data = buyer_doc.to_dict()
+
+        # Get the listing to ensure it exists and to get the seller information
+        listing_ref = db_client.collection("listings").document(listing_id)
+        listing_doc = await listing_ref.get()
+
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+        seller_ref_path = listing_data.get("owner_reference")
+
+        # Get the seller to ensure they exist and to get their Stripe account ID
+        # The owner_reference is a full document path, so we need to get a document reference directly
+        seller_ref = db_client.document(seller_ref_path)
+        seller_doc = await seller_ref.get()
+
+        if not seller_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Seller with path {seller_ref_path} not found")
+
+        seller_data = seller_doc.to_dict()
+        stripe_account_id = seller_data.get("stripe_account_id")
+
+        if not stripe_account_id:
+            raise HTTPException(status_code=400, detail="Seller does not have a Stripe Connect account")
+
+        # Get the offer to ensure it exists and to get the amount
+        offer_ref = db_client.collection("listings").document(listing_id).collection("cash_offers").document(offer_id)
+        offer_doc = await offer_ref.get()
+
+        if not offer_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Offer with ID {offer_id} not found")
+
+        offer_data = offer_doc.to_dict()
+        amount = int(float(offer_data.get("amount", 0)) * 100)  # Convert dollars to cents
+
+        if amount <= 0:
+            raise HTTPException(status_code=400, detail="Offer amount must be greater than 0")
+
+        # Calculate application fee (platform fee)
+        application_fee_percentage = 0.10  # 10% platform fee
+        application_fee_amount = int(amount * application_fee_percentage)
+
+        # Prepare metadata
+        metadata = {
+            "buyer_id": user_id,
+            "listing_id": listing_id,
+            "offer_id": offer_id
+        }
+
+        # Create the payment intent
+        payment_intent = stripe.PaymentIntent.create(
+            amount=amount,
+            currency="usd",
+            application_fee_amount=application_fee_amount,
+            metadata=metadata,
+            customer=None,  # You can set this if you have a Stripe customer ID for the buyer
+            stripe_account=stripe_account_id,  # Connect seller account
+            automatic_payment_methods = {
+                "enabled": True,
+                "allow_redirects": "never"
+            }
+
+        )
+
+        # Log the payment intent creation
+        logger.info(f"Created marketplace payment intent {payment_intent.id} for user {user_id} with amount {amount} USD")
+
+        # Return the payment intent details
+        return {
+            "id": payment_intent.id,
+            "client_secret": payment_intent.client_secret,
+            "amount": payment_intent.amount,
+            "currency": payment_intent.currency,
+            "status": payment_intent.status,
+            "listing_id": listing_id,
+            "offer_id": offer_id
+        }
+
+    except stripe.error.StripeError as e:
+        # Handle Stripe-specific errors
+        logger.error(f"Stripe error creating marketplace payment intent: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
+    except HTTPException as e:
+        # Re-raise HTTP exceptions
+        logger.error(f"HTTP error in create_marketplace_intent: {e.detail}")
+        raise e
+    except Exception as e:
+        # Handle other exceptions
+        logger.error(f"Error in create_marketplace_intent: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+
+
+
 async def handle_stripe_webhook(request: Request, signature: str, db_client: AsyncClient) -> Dict[str, Any]:
     """
     Handle Stripe webhook events, particularly payment_intent.succeeded.
@@ -267,7 +400,6 @@ async def get_user_recharge_history(user_id: str, db_client: AsyncClient) -> Dic
         total_cash_recharged = user_data.get("totalCashRecharged", 0)
 
         # Query the cash_recharges table in PostgreSQL
-        from config.db_connection import db_connection
 
         recharge_history = []
         with db_connection() as conn:
@@ -323,6 +455,525 @@ async def get_user_recharge_history(user_id: str, db_client: AsyncClient) -> Dic
             detail=f"An unexpected error occurred: {str(e)}"
         )
 
+async def create_stripe_connect_account(user_id: str, db_client: AsyncClient) -> Dict[str, str]:
+    """
+    Create a Stripe Connect Express account for a seller and generate an onboarding link.
+
+    Args:
+        user_id: The ID of the user (seller)
+        db_client: Firestore client
+
+    Returns:
+        Dict containing the onboarding URL
+
+    Raises:
+        HTTPException: If there's an error creating the account or generating the link
+    """
+    try:
+        # Validate user_id by checking if user exists in Firestore
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            logger.error(f"User with ID {user_id} not found when creating Stripe Connect account")
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        user_data = user_doc.to_dict()
+
+        # Check if user already has a Stripe Connect account
+        if user_data.get("stripe_account_id"):
+            # If the user already has an account, retrieve it to check its status
+            try:
+                account = stripe.Account.retrieve(user_data["stripe_account_id"])
+
+                # If the account exists and is not rejected, create a new account link
+                if account.get("charges_enabled") and account.get("payouts_enabled"):
+                    logger.info(f"User {user_id} already has a fully onboarded Stripe Connect account")
+                    return {"onboarding_url": ""}  # Return empty URL for fully onboarded accounts
+
+                # Create a new account link for incomplete accounts
+                account_link = stripe.AccountLink.create(
+                    account=user_data["stripe_account_id"],
+                    type="account_onboarding",
+                    refresh_url="https://zapull.com/stripe/complete",
+                    return_url="https://zapull.com/stripe/complete"
+                )
+
+                logger.info(f"Created new onboarding link for existing Stripe Connect account for user {user_id}")
+                return {"onboarding_url": account_link.url}
+
+            except stripe.error.StripeError as e:
+                # If the account doesn't exist anymore or there's another issue, create a new one
+                logger.warning(f"Error retrieving Stripe account for user {user_id}: {str(e)}")
+                # Continue to create a new account
+
+        # Create a new Stripe Connect Express account
+        account = stripe.Account.create(
+            type="express",
+            country="US",
+            capabilities={"card_payments": {"requested": True},"transfers": {"requested": True}},
+            metadata={"user_id": user_id}
+        )
+
+        logger.info(f"Created Stripe Connect account {account.id} for user {user_id}")
+
+        # Save the account ID to the user's document in Firestore
+        await user_ref.update({"stripe_account_id": account.id})
+
+        # Create an account link for onboarding
+        account_link = stripe.AccountLink.create(
+            account=account.id,
+            type="account_onboarding",
+            refresh_url="https://zapull.com/stripe/complete",
+            return_url="https://zapull.com/stripe/complete"
+        )
+
+        logger.info(f"Created onboarding link for Stripe Connect account for user {user_id}")
+
+        return {"onboarding_url": account_link.url}
+
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating Connect account for user {user_id}: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error creating Stripe Connect account for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )
+
+async def check_stripe_tax_enabled(user_id: str, db_client: AsyncClient) -> Dict[str, bool]:
+    """
+    Check if automatic tax is enabled for a user's Stripe Connect account.
+
+    Args:
+        user_id: The ID of the user (seller)
+        db_client: Firestore client
+
+    Returns:
+        Dict containing whether automatic tax is enabled for the Stripe account
+
+    Raises:
+        HTTPException: If there's an error checking the tax status
+    """
+    try:
+        user_ref = db_client.collection("users").document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        user_data = user_doc.to_dict()
+        stripe_account_id = user_data.get("stripe_account_id")
+
+        if not stripe_account_id:
+            raise HTTPException(status_code=400, detail="User does not have a Stripe Connect account")
+
+        try:
+            account = stripe.Account.retrieve(stripe_account_id)
+            tax_settings = account.get("settings", {}).get("tax", {})
+            automatic_tax_enabled = tax_settings.get("automatic_tax", {}).get("enabled", False)
+
+            # Optionally update the user document with the tax status
+            if automatic_tax_enabled:
+                await user_ref.update({"stripe_tax_enabled": True})
+
+            return {
+                "stripe_tax_enabled": automatic_tax_enabled
+            }
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error checking Stripe tax status for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )
+
+async def create_stripe_dashboard_link(user_id: str, db_client: AsyncClient) -> Dict[str, str]:
+    """
+    Create a login link for a user's Stripe Express dashboard.
+
+    Args:
+        user_id: The ID of the user (seller)
+        db_client: Firestore client
+
+    Returns:
+        Dict containing the login URL for the Stripe Express dashboard
+
+    Raises:
+        HTTPException: If there's an error creating the login link
+    """
+    try:
+        user_ref = db_client.collection("users").document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        user_data = user_doc.to_dict()
+        stripe_account_id = user_data.get("stripe_account_id")
+
+        if not stripe_account_id:
+            raise HTTPException(status_code=400, detail="User does not have a Stripe Connect account")
+
+        try:
+            # Create a login link for the Stripe Express dashboard
+            login_link = stripe.Account.create_login_link(stripe_account_id)
+
+            return {
+                "login_url": login_link.url
+            }
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error creating Stripe dashboard link for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )
+
+async def handle_marketplace_payment(
+    payment_id: str,
+    amount: int,
+    amount_dollars: float,
+    currency: str,
+    listing_id: str,
+    buyer_id: str,
+    offer_id: str,
+    db_client: AsyncClient
+) -> Dict[str, Any]:
+    """
+    Handle a successful marketplace payment intent event.
+    This is similar to pay_point_offer but for cash payments.
+
+    Args:
+        payment_id: The payment intent ID from Stripe
+        amount: The amount in cents
+        amount_dollars: The amount in dollars
+        currency: The currency code
+        listing_id: The ID of the listing
+        buyer_id: The ID of the buyer
+        offer_id: The ID of the offer
+        db_client: Firestore client
+
+    Returns:
+        Dict containing information about the processed payment
+
+    Raises:
+        HTTPException: If there's an error processing the payment
+    """
+    try:
+        logger.info(f"Processing marketplace payment for listing {listing_id}, buyer {buyer_id}, offer {offer_id}")
+
+        # 1. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+        # 2. Get the seller information
+        seller_ref_path = listing_data.get("owner_reference", "")
+        if not seller_ref_path:
+            raise HTTPException(status_code=500, detail="Invalid listing data: missing owner reference")
+
+        seller_id = seller_ref_path.split('/')[-1]
+
+        # 3. Get card information
+        card_reference = listing_data.get("card_reference", "")
+        collection_id = listing_data.get("collection_id", "")
+
+        if not card_reference or not collection_id:
+            raise HTTPException(status_code=500, detail="Invalid listing data: missing card reference or collection ID")
+
+        # 4. Get the quantity to deduct from the listing
+        quantity_to_deduct = 1  # Default to 1
+
+        # 5. Create a transaction ID
+        transaction_id = f"tx_{listing_id}_{offer_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        # 6. Execute the transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # a. Update the listing quantity
+            current_quantity = listing_data.get("quantity", 0)
+            new_quantity = current_quantity - quantity_to_deduct
+
+            if new_quantity <= 0:
+                # Delete the listing if quantity becomes zero
+                tx.delete(listing_ref)
+            else:
+                # Update the listing quantity
+                tx.update(listing_ref, {
+                    "quantity": new_quantity
+                })
+
+            # b. Deduct locked_quantity from the seller's card
+            try:
+                # Parse card_reference to get card_id
+                card_id = card_reference.split('/')[-1]
+
+                # Get reference to the seller's card
+                seller_ref = db_client.document(seller_ref_path)
+                seller_card_ref = seller_ref.collection('cards').document('cards').collection(collection_id).document(card_id)
+
+                # Get the seller's card to check current values
+                seller_card_doc = await seller_card_ref.get()
+
+                if seller_card_doc.exists:
+                    seller_card_data = seller_card_doc.to_dict()
+                    current_locked_quantity = seller_card_data.get('locked_quantity', 0)
+                    current_card_quantity = seller_card_data.get('quantity', 0)
+
+                    # Ensure we don't go below zero for locked_quantity
+                    new_locked_quantity = max(0, current_locked_quantity - quantity_to_deduct)
+
+                    # Check if both quantity and locked_quantity will be zero
+                    if current_card_quantity == 0 and new_locked_quantity == 0:
+                        # Delete the card from the seller's collection
+                        tx.delete(seller_card_ref)
+                        logger.info(f"Deleted card {card_id} from seller {seller_id}'s collection as both quantity and locked_quantity are zero")
+                    else:
+                        # Update the card with decremented locked_quantity
+                        tx.update(seller_card_ref, {
+                            'locked_quantity': new_locked_quantity
+                        })
+                        logger.info(f"Updated locked_quantity for card {card_id} in seller {seller_id}'s collection to {new_locked_quantity}")
+            except Exception as e:
+                logger.error(f"Error updating seller's card: {e}", exc_info=True)
+                # Continue with the transaction even if updating the seller's card fails
+                # This ensures the main transaction still completes
+
+            # c. Create a marketplace transaction record
+            transaction_ref = db_client.collection('marketplace_transactions').document(transaction_id)
+            transaction_data = {
+                "id": transaction_id,
+                "listing_id": listing_id,
+                "seller_id": seller_id,
+                "buyer_id": buyer_id,
+                "card_id": card_reference.split('/')[-1],
+                "quantity": quantity_to_deduct,
+                "price_points": None,
+                "price_cash": amount_dollars,
+                "price_card_id": None,
+                "price_card_qty": None,
+                "traded_at": datetime.now()
+            }
+            tx.set(transaction_ref, transaction_data)
+
+            # d. Update the offer status if offer_id is provided
+            if offer_id:
+                offer_ref = listing_ref.collection('cash_offers').document(offer_id)
+                tx.update(offer_ref, {
+                    "status": "paid",
+                    "paid_at": datetime.now()
+                })
+
+                # e. Delete the user's offer from their my_cash_offers collection if it exists
+                try:
+                    buyer_ref = db_client.collection('users').document(buyer_id)
+                    my_cash_offers_ref = buyer_ref.collection('my_cash_offers')
+                    my_cash_offers_query = my_cash_offers_ref.where("listingId", "==", listing_id)
+                    my_cash_offers_docs = await my_cash_offers_query.get()
+
+                    for doc in my_cash_offers_docs:
+                        my_offer_data = doc.to_dict()
+                        # Check if this is the same offer by comparing offerreference
+                        if my_offer_data.get("offerreference") == offer_id:
+                            tx.delete(doc.reference)
+                            break
+                except Exception as e:
+                    logger.error(f"Error deleting user's offer: {e}", exc_info=True)
+                    # Continue with the transaction even if deleting the user's offer fails
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        # 7. Insert data into the marketplace_transactions SQL table
+        # Use a single database connection for the SQL operation to ensure transaction integrity
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                # Begin transaction
+                conn.autocommit = False
+
+                # Record the transaction in marketplace_transactions table
+                cursor.execute(
+                    """
+                    INSERT INTO marketplace_transactions (listing_id, seller_id, buyer_id, card_id, quantity, price_points, price_cash, price_card_id, price_card_qty, traded_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (listing_id, seller_id, buyer_id, card_reference.split('/')[-1], quantity_to_deduct, None, int(amount_dollars), None, None, datetime.now())
+                )
+                sql_transaction_id = cursor.fetchone()[0]
+                logger.info(f"Created marketplace transaction record with ID {sql_transaction_id}")
+
+                # Commit the transaction
+                conn.commit()
+                logger.info(f"Successfully committed SQL database transaction for marketplace transaction {transaction_id}")
+                logger.info(f"Recorded marketplace transaction: listing {listing_id}, seller {seller_id}, buyer {buyer_id}, cash {amount_dollars}")
+
+            except Exception as e:
+                # Rollback on error
+                conn.rollback()
+                logger.error(f"SQL database transaction failed, rolling back: {str(e)}", exc_info=True)
+                # Continue with the response - we've already completed the Firestore transaction,
+                # so we don't want to fail the whole operation just because of a database issue
+                logger.warning("SQL database transaction failed but Firestore transaction was successful")
+
+            finally:
+                # Close cursor (connection will be closed by context manager)
+                cursor.close()
+
+        # 8. Add the card to the user's collection
+        try:
+            await add_card_to_user(
+                user_id=buyer_id,
+                card_reference=card_reference,
+                db_client=db_client,
+                collection_metadata_id=collection_id,
+                from_market_place = True,
+            )
+        except Exception as e:
+            logger.error(f"Error adding card to user {buyer_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Transaction completed but failed to add card to user: {str(e)}")
+
+        logger.info(f"Successfully processed marketplace payment for listing {listing_id}, buyer {buyer_id}, offer {offer_id}")
+        return {
+            "status": "success",
+            "payment_id": payment_id,
+            "transaction_id": transaction_id,
+            "listing_id": listing_id,
+            "offer_id": offer_id,
+            "buyer_id": buyer_id,
+            "seller_id": seller_id,
+            "amount": amount,
+            "currency": currency
+        }
+
+    except HTTPException as e:
+        # Re-raise HTTP exceptions to be handled by the FastAPI exception handler
+        raise
+    except Exception as e:
+        logger.error(f"Error handling marketplace payment: {str(e)}", exc_info=True)
+        # Return a 500 status code which will cause Stripe to retry the webhook
+        raise HTTPException(
+            status_code=500, 
+            detail=f"An unexpected error occurred, Stripe should retry this webhook: {str(e)}"
+        )
+
+async def update_tax_user_consent(user_id: str, db_client: AsyncClient) -> Dict[str, Any]:
+    """
+    Update a user's tax consent status to true.
+
+    Args:
+        user_id: The ID of the user
+        db_client: Firestore client
+
+    Returns:
+        Dict containing success status and user ID
+
+    Raises:
+        HTTPException: If there's an error updating the user's tax consent
+    """
+    try:
+        user_ref = db_client.collection("users").document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Update the user document with tax_user_consented=True
+        await user_ref.update({"tax_user_consented": True})
+
+        logger.info(f"Updated tax consent for user {user_id}")
+
+        return {
+            "success": True,
+            "user_id": user_id
+        }
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error updating tax consent for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )
+
+async def check_stripe_connect_status(user_id: str, db_client: AsyncClient) -> Dict[str, str]:
+    """
+    Check the status of a user's Stripe Connect account.
+
+    Args:
+        user_id: The ID of the user (seller)
+        db_client: Firestore client
+
+    Returns:
+        Dict containing the status of the Stripe Connect account
+
+    Raises:
+        HTTPException: If there's an error checking the account status
+    """
+    try:
+        # Validate user_id by checking if user exists in Firestore
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            logger.error(f"User with ID {user_id} not found when checking Stripe Connect status")
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        user_data = user_doc.to_dict()
+
+        # Check if user has a Stripe Connect account
+        stripe_account_id = user_data.get("stripe_account_id")
+
+        if not stripe_account_id:
+            logger.info(f"User {user_id} does not have a Stripe Connect account")
+            return {"status": "not_connected"}
+
+        # Retrieve the Stripe account to check its status
+        try:
+            account = stripe.Account.retrieve(stripe_account_id)
+
+            # Check if the account is fully onboarded (can accept charges and receive payouts)
+            if account.charges_enabled and account.payouts_enabled:
+                logger.info(f"User {user_id} has a fully onboarded Stripe Connect account")
+                return {"status": "ready"}
+            else:
+                logger.info(f"User {user_id} has an incomplete Stripe Connect account")
+                return {"status": "incomplete"}
+
+        except stripe.error.StripeError as e:
+            logger.error(f"Stripe error retrieving Connect account for user {user_id}: {str(e)}")
+            # If the account doesn't exist or there's another issue, consider it not connected
+            return {"status": "not_connected"}
+
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error checking Stripe Connect status for user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )
+
 async def handle_payment_succeeded(payment_intent: Dict[str, Any], db_client: AsyncClient) -> Dict[str, Any]:
     """
     Handle a successful payment intent event.
@@ -345,6 +996,24 @@ async def handle_payment_succeeded(payment_intent: Dict[str, Any], db_client: As
         currency = payment_intent['currency']
         metadata = payment_intent.get('metadata', {})
         user_id = metadata.get('user_id')
+
+        # Check if this is a marketplace payment
+        listing_id = metadata.get('listing_id')
+        buyer_id = metadata.get('buyer_id')
+        offer_id = metadata.get('offer_id')
+
+        # If this is a marketplace payment, handle it differently
+        if listing_id and buyer_id:
+            return await handle_marketplace_payment(
+                payment_id=payment_id,
+                amount=amount,
+                amount_dollars=amount_dollars,
+                currency=currency,
+                listing_id=listing_id,
+                buyer_id=buyer_id,
+                offer_id=offer_id,
+                db_client=db_client
+            )
 
         # Validate user_id
         if not user_id:
@@ -447,8 +1116,7 @@ async def handle_payment_succeeded(payment_intent: Dict[str, Any], db_client: As
                     detail=f"Failed to update user, Stripe should retry this webhook: {str(points_error)}"
                 )
 
-        # Import needed modules for transaction management
-        from config.db_connection import db_connection
+        # Use db_connection for database operations
 
         # Use a single database connection for both operations to ensure transaction integrity
         with db_connection() as conn:

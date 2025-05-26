@@ -36,6 +36,7 @@ class User(BaseModel):
     clientSeed: Optional[str] = None  # Client seed for randomization
     referred_by: Optional[str] = None  # ID of the user who referred this user
     total_point_refered: int = 0  # Total points earned through referrals
+    stripe_account_id: Optional[str] = None  # Stripe Connect account ID for sellers
 
     class Config:
         from_attributes = True
@@ -167,6 +168,7 @@ class RandomFusionRequest(BaseModel):
 
 class CardListing(BaseModel):
     """Model for a card listing"""
+    id: Optional[str] = None  # Listing ID
     owner_reference: str  # Reference to the seller user document
     card_reference: str  # Card global ID
     collection_id: str  # Collection ID of the card
@@ -351,6 +353,23 @@ class WithdrawRequestsResponse(BaseModel):
     """Response model for listing withdraw requests with pagination"""
     withdraw_requests: List[WithdrawRequest]
     pagination: PaginationInfo
+
+class MarketplaceTransaction(BaseModel):
+    """Model for a marketplace transaction"""
+    id: str = Field(..., description="The ID of the transaction")
+    listing_id: str = Field(..., description="The ID of the listing")
+    seller_id: str = Field(..., description="The ID of the seller")
+    buyer_id: str = Field(..., description="The ID of the buyer")
+    card_id: str = Field(..., description="The ID of the card")
+    quantity: int = Field(..., description="The quantity of cards traded")
+    price_points: int = Field(..., description="The price in points")
+    price_card_id: Optional[str] = Field(None, description="The ID of the card used as payment (if applicable)")
+    price_card_qty: Optional[int] = Field(None, description="The quantity of cards used as payment (if applicable)")
+    traded_at: datetime = Field(..., description="The timestamp when the transaction occurred")
+
+class PayPointOfferRequest(BaseModel):
+    """Request model for paying a point offer"""
+    offer_id: str = Field(..., description="The ID of the offer to pay")
 
 # Note: For file uploads, we don't use a Pydantic model
 # The avatar upload endpoint will use FastAPI's File and UploadFile directly

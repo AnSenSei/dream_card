@@ -4,7 +4,7 @@ from google.cloud import firestore
 from pydantic import BaseModel
 
 from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse, WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse, WithdrawRequestsResponse
-from service.user_service import (
+from service.card_service import (
     add_multiple_cards_to_user,
     draw_card_from_pack,
     draw_multiple_cards_from_pack,
@@ -40,6 +40,7 @@ async def add_card_to_user_route(
     user_id: str = Path(...),
     collection_metadata_id: str = Query(..., description="The ID of the collection metadata to use for the subcollection"),
     card_request: CardReferencesRequest = Body(..., description="Request body containing card references"),
+    from_marketplace: bool = Query(False, description="Whether the card is being purchased from the marketplace"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
@@ -69,7 +70,8 @@ async def add_card_to_user_route(
                 user_id=user_id,
                 card_reference=card_request.card_references[0],
                 db_client=db,
-                collection_metadata_id=collection_metadata_id
+                collection_metadata_id=collection_metadata_id,
+                from_marketplace=from_marketplace
             )
             return {"message": result}
         else:
