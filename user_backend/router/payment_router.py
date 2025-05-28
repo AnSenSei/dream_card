@@ -131,7 +131,7 @@ async def stripe_webhook_route(
         logger.error(f"Error processing Stripe webhook: {e}", exc_info=True)
         # Return 500 to cause Stripe to retry the webhook
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail="An error occurred while processing the webhook, Stripe should retry"
         )
 

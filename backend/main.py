@@ -11,6 +11,7 @@ from router import packs_router # Your existing routers
 from router import storage_router # Import the storage router
 from router import fusion_router # Import the fusion router
 from router import marketplace_router # Import the marketplace router
+from router import achievement_router
 
 # Configure logging with structured logger
 logger = get_logger("main") # Use the logger from config
@@ -73,6 +74,9 @@ api_v1.include_router(packs_router.router)
 api_v1.include_router(storage_router.router) # Include the storage router
 api_v1.include_router(fusion_router.router) # Include the fusion router
 api_v1.include_router(marketplace_router.router) # Include the marketplace router
+
+api_v1.include_router(achievement_router.router)
+
 logger.info("Gacha routers (packs, cards, draw), storage router, fusion router, and marketplace router included in the sub-API.")
 
 

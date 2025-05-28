@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     gcs_project_id: str = "seventh-program-433718-h8"
     gcs_bucket_name: str = "pokemon_cards_pull"
     PACKS_BUCKET: str = "pack_covers"
+    user_avator_bucket: str = "user_avatars"
+    emblem_bucket: str = "achievement_emblems"
 
     # Firestore settings
     firestore_project_id: str = "seventh-program-433718-h8"
