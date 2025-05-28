@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Body
 from google.cloud import firestore
 from typing import List
 
-from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest, AcceptedOffersResponse, AllOffersResponse, PayPointOfferRequest
-from service.marketplace_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer, get_accepted_offers, get_all_offers, pay_point_offer, get_all_listings
+from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest, AcceptedOffersResponse, AllOffersResponse, PayPointOfferRequest, MarketplaceTransaction
+from service.marketplace_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer, get_accepted_offers, get_all_offers, pay_point_offer, get_all_listings, get_user_marketplace_transactions
 from config import get_firestore_client, get_logger
 
 logger = get_logger(__name__)
@@ -515,3 +515,29 @@ async def pay_point_offer_route(
     except Exception as e:
         logger.error(f"Error paying for point offer: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while paying for the point offer")
+
+
+@router.get("/{user_id}/transactions", response_model=List[MarketplaceTransaction])
+async def get_user_marketplace_transactions_route(
+    user_id: str = Path(..., description="The ID of the user to get marketplace transactions for"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Get all marketplace transactions for a user (both as buyer and seller).
+
+    This endpoint:
+    1. Takes a user ID as an argument
+    2. Retrieves all marketplace transactions where the user is either a buyer or seller
+    3. Returns a list of transactions with details including listing_id, seller_id, buyer_id, card_id, quantity, price, etc.
+    """
+    try:
+        transactions = await get_user_marketplace_transactions(
+            user_id=user_id,
+            db_client=db
+        )
+        return transactions
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting user marketplace transactions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while getting marketplace transactions")

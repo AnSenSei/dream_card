@@ -13,6 +13,7 @@ class CardPack(BaseModel):
     image_url: Optional[str] = None
     win_rate: Optional[int] = None
     max_win: Optional[int] = None
+    min_win: Optional[int] = None
     popularity: Optional[int] = 0
 
 class AddPackRequest(BaseModel):
@@ -24,6 +25,7 @@ class AddPackRequest(BaseModel):
     price: int
     win_rate: Optional[int] = None
     max_win: Optional[int] = None
+    min_win: Optional[int] = None
     is_active: bool = False
     popularity: Optional[int] = 0
 
@@ -75,6 +77,7 @@ class UpdatePackRequest(BaseModel):
     rarities: Optional[Dict[str, Dict[str, Any]]] = None
     win_rate: Optional[int] = None
     max_win: Optional[int] = None
+    min_win: Optional[int] = None
     popularity: Optional[int] = None
 
 

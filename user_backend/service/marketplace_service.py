@@ -6,7 +6,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_transactional, Increment
 
 from config import get_logger, settings
-from models.schemas import CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CardListing
+from models.schemas import CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CardListing, MarketplaceTransaction
 
 from service.card_service import get_user_card, add_card_to_user
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs, parse_base64_image
@@ -1592,6 +1592,73 @@ async def get_accepted_offers(user_id: str, offer_type: str, db_client: AsyncCli
     except Exception as e:
         logger.error(f"Error getting accepted {offer_type} offers for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get accepted {offer_type} offers: {str(e)}")
+
+
+async def get_user_marketplace_transactions(
+    user_id: str,
+    db_client: AsyncClient
+) -> List[MarketplaceTransaction]:
+    """
+    Retrieve all marketplace transactions where the user is either a buyer or seller.
+
+    Args:
+        user_id: The ID of the user
+        db_client: Firestore async client
+
+    Returns:
+        List of MarketplaceTransaction objects
+
+    Raises:
+        HTTPException: If there's an error retrieving the transactions
+    """
+    logger = get_logger(__name__)
+    try:
+        # Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Query transactions where user is buyer
+        buyer_query = db_client.collection('marketplace_transactions').where("buyer_id", "==", user_id)
+        buyer_docs = await buyer_query.get()
+
+        # Query transactions where user is seller
+        seller_query = db_client.collection('marketplace_transactions').where("seller_id", "==", user_id)
+        seller_docs = await seller_query.get()
+
+        # Combine and convert to MarketplaceTransaction objects
+        transactions = []
+
+        # Process buyer transactions
+        for doc in buyer_docs:
+            transaction_data = doc.to_dict()
+            # Convert Firestore timestamp to datetime if needed
+            if transaction_data.get("traded_at") == firestore.SERVER_TIMESTAMP:
+                transaction_data["traded_at"] = datetime.now()
+            transactions.append(MarketplaceTransaction(**transaction_data))
+
+        # Process seller transactions
+        for doc in seller_docs:
+            transaction_data = doc.to_dict()
+            # Convert Firestore timestamp to datetime if needed
+            if transaction_data.get("traded_at") == firestore.SERVER_TIMESTAMP:
+                transaction_data["traded_at"] = datetime.now()
+
+            # Check if this transaction is already in the list (from buyer query)
+            if not any(t.id == transaction_data["id"] for t in transactions):
+                transactions.append(MarketplaceTransaction(**transaction_data))
+
+        # Sort transactions by traded_at in descending order (newest first)
+        transactions.sort(key=lambda x: x.traded_at, reverse=True)
+
+        logger.info(f"Retrieved {len(transactions)} marketplace transactions for user {user_id}")
+        return transactions
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting marketplace transactions for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get marketplace transactions: {str(e)}")
 
 
 async def pay_point_offer(

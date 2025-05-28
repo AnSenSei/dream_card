@@ -352,6 +352,52 @@ async def update_max_win_route(
         logger.error(f"Unhandled error in update_max_win_route: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while updating the pack's max_win value.")
 
+@router.patch("/{collection_id}/{pack_id}/min_win", response_model=Dict[str, str])
+async def update_min_win_route(
+    collection_id: str,
+    pack_id: str,
+    min_win: int = Form(...),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Updates the min_win value for a specific pack.
+
+    Args:
+        collection_id: The ID of the pack collection containing the pack
+        pack_id: The ID of the pack to update
+        min_win: The new min_win value for the pack
+        db: Firestore client dependency
+
+    Returns:
+        Dictionary with success message
+    """
+    try:
+        # Pass the collection_id as part of the pack_id path parameter
+        # Format: collection_id/pack_id
+        pack_path = f"{collection_id}/{pack_id}"
+
+        # Create an updates dictionary with just the min_win field
+        updates = {"min_win": min_win}
+
+        # Use the existing update_pack_in_firestore function to update the pack
+        await update_pack_in_firestore(
+            pack_id=pack_path,
+            updates=updates,
+            db_client=db
+        )
+        return {
+            "message": f"Successfully updated min_win to {min_win} for pack '{pack_id}' in collection '{collection_id}'",
+            "pack_id": pack_id,
+            "collection_id": collection_id,
+            "min_win": str(min_win)
+        }
+    except HTTPException:
+        # Re-raise HTTPExceptions from the service layer
+        raise
+    except Exception as e:
+        logger.error(f"Unhandled error in update_min_win_route: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred while updating the pack's min_win value.")
+
 @router.delete("/{collection_id}/{pack_id}", response_model=Dict[str, str])
 async def delete_pack_route(
     collection_id: str,

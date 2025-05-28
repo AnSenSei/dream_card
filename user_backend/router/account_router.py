@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body, File, 
 from typing import Optional, List
 from google.cloud import firestore
 
-from models.schemas import User, Address, CreateAccountRequest, UserEmailAddressUpdate, AddPointsRequest, CheckReferResponse, GetReferralsResponse, GetReferCodeResponse
+from models.schemas import User, Address, CreateAccountRequest, UserEmailAddressUpdate, AddPointsRequest, CheckReferResponse, GetReferralsResponse, GetReferCodeResponse, LikeUserRequest, LikeUserResponse
 from service.account_service import (
     get_user_by_id,
     update_user_email_and_address,
@@ -14,7 +14,8 @@ from service.account_service import (
     update_seed,
     check_user_referred,
     get_user_referrals,
-    get_user_refer_code
+    get_user_refer_code,
+    like_user
 )
 from config import get_firestore_client, get_logger
 
@@ -305,3 +306,28 @@ async def get_user_refer_code_route(
     except Exception as e:
         logger.error(f"Error getting user referral code: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while getting the user referral code")
+
+@router.post("/{user_id}/like", response_model=LikeUserResponse)
+async def like_user_route(
+    user_id: str = Path(..., description="The ID of the user who is liking another user"),
+    like_request: LikeUserRequest = Body(..., description="The request containing the target user ID to like"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Like another user.
+
+    This endpoint:
+    1. Takes a user ID and a target user ID
+    2. Creates a record in the user's 'likes' subcollection
+    3. Returns a response with information about the like action
+
+    This is used to allow users to like other users.
+    """
+    try:
+        result = await like_user(user_id, like_request.target_user_id, db)
+        return LikeUserResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error liking user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while liking the user")

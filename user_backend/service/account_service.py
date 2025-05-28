@@ -814,3 +814,59 @@ async def update_user_avatar(user_id: str, avatar: bytes, content_type: str, db_
     except Exception as e:
         logger.error(f"Error updating avatar for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update avatar: {str(e)}")
+
+
+async def like_user(user_id: str, target_user_id: str, db_client: AsyncClient) -> dict:
+    """
+    Like another user.
+
+    Args:
+        user_id: The ID of the user who is liking another user
+        target_user_id: The ID of the user being liked
+        db_client: Firestore client
+
+    Returns:
+        A dictionary with information about the like action
+
+    Raises:
+        HTTPException: If there's an error liking the user
+    """
+    try:
+        # Check if both users exist
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        target_user_ref = db_client.collection(settings.firestore_collection_users).document(target_user_id)
+        target_user_doc = await target_user_ref.get()
+
+        if not target_user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Target user with ID {target_user_id} not found")
+
+        # Create a timestamp for the like action
+        liked_at = datetime.now()
+
+        # Add the target user to the user's likes subcollection
+        likes_ref = user_ref.collection("likes").document(target_user_id)
+        await likes_ref.set({
+            "target_user_id": target_user_id,
+            "liked_at": liked_at
+        })
+
+        logger.info(f"User {user_id} liked user {target_user_id}")
+
+        # Return information about the like action
+        return {
+            "success": True,
+            "message": f"Successfully liked user {target_user_id}",
+            "user_id": user_id,
+            "target_user_id": target_user_id,
+            "liked_at": liked_at
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error liking user {target_user_id} by user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to like user: {str(e)}")

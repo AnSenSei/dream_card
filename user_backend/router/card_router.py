@@ -241,6 +241,7 @@ async def draw_multiple_cards_route(
 async def destroy_card_route(
     user_id: str = Path(...),
     card_id: str = Path(...),
+    quantity: int = Query(1, description="The quantity of the card to destroy (default: 1)"),
     subcollection_name: str = Query(..., description="The name of the subcollection where the card is stored"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
@@ -257,7 +258,8 @@ async def destroy_card_route(
             user_id=user_id,
             card_id=card_id,
             subcollection_name=subcollection_name,
-            db_client=db
+            db_client=db,
+            quantity = quantity
         )
         return {"message": result}
     except HTTPException:

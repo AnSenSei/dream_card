@@ -59,6 +59,7 @@ async def create_pack_in_firestore(
     price = pack_data.price
     win_rate = pack_data.win_rate
     max_win = pack_data.max_win
+    min_win = pack_data.min_win
     is_active = pack_data.is_active
     popularity = pack_data.popularity
 
@@ -131,6 +132,7 @@ async def create_pack_in_firestore(
             "price": price,
             "win_rate": win_rate,
             "max_win": max_win,
+            "min_win": min_win,
             "is_active": is_active,
             "popularity": popularity,
         }
@@ -189,6 +191,7 @@ async def get_all_packs_from_firestore(db_client: firestore.AsyncClient) -> List
                 cards_by_rarity=pack_data.get('cards_by_rarity'),
                 win_rate=pack_data.get('win_rate'),
                 max_win=pack_data.get('max_win'),
+                min_win=pack_data.get('min_win'),
                 popularity=pack_data.get('popularity', 0)
                 # rarity_configurations is intentionally omitted here as per user request
             ))
@@ -251,6 +254,7 @@ async def get_packs_collection_from_firestore(collection_id: str, db_client: fir
                 image_url=signed_image_url,
                 win_rate=pack_data.get('win_rate'),
                 max_win=pack_data.get('max_win'),
+                min_win=pack_data.get('min_win'),
                 popularity=pack_data.get('popularity', 0)
             )
             packs_list.append(pack)
@@ -374,6 +378,7 @@ async def _process_pack_document(doc_snapshot, db_client, collection_id):
             cards_by_rarity=pack_data.get('cards_by_rarity'),
             win_rate=pack_data.get('win_rate'),
             max_win=pack_data.get('max_win'),
+            min_win=pack_data.get('min_win'),
             popularity=pack_data.get('popularity', 0),
             rarity_configurations=rarity_configurations # Add fetched rarities
         )
@@ -702,10 +707,27 @@ async def update_pack_in_firestore(
     updates: Dict[str, Any],
     db_client: AsyncClient
 ) -> bool:
-    pack_ref = db_client.collection('packs').document(pack_id)
-    pack_snap = await pack_ref.get()
-    if not pack_snap.exists:
-        raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
+    try:
+        # Check if pack_id contains a slash (indicating collection_id/pack_id format)
+        parts = pack_id.split('/', 1)
+        if len(parts) > 1:
+            # If pack_id includes collection_id (collection_id/pack_id format)
+            collection_id, actual_pack_id = parts
+            logger.info(f"Parsed pack_id '{pack_id}' into collection_id='{collection_id}' and pack_id='{actual_pack_id}'")
+
+            # Construct the reference to the pack document
+            pack_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(actual_pack_id)
+        else:
+            # If just a simple pack_id
+            logger.warning(f"No collection_id found in pack_id '{pack_id}', using it directly as document ID")
+            pack_ref = db_client.collection('packs').document(pack_id)
+
+        pack_snap = await pack_ref.get()
+        if not pack_snap.exists:
+            raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
+    except Exception as e:
+        logger.error(f"Error accessing pack '{pack_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error accessing pack: {str(e)}")
 
     batch = db_client.batch()
 
@@ -723,6 +745,8 @@ async def update_pack_in_firestore(
         pack_level_updates["popularity"] = updates["popularity"]
     if "max_win" in updates:
         pack_level_updates["max_win"] = updates["max_win"]
+    if "min_win" in updates:
+        pack_level_updates["min_win"] = updates["min_win"]
 
     if pack_level_updates: # If there are any top-level fields to update
         batch.update(pack_ref, pack_level_updates)

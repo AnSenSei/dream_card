@@ -362,14 +362,27 @@ class MarketplaceTransaction(BaseModel):
     buyer_id: str = Field(..., description="The ID of the buyer")
     card_id: str = Field(..., description="The ID of the card")
     quantity: int = Field(..., description="The quantity of cards traded")
-    price_points: int = Field(..., description="The price in points")
+    price_points: Optional[int] = Field(None, description="The price in points")
     price_card_id: Optional[str] = Field(None, description="The ID of the card used as payment (if applicable)")
     price_card_qty: Optional[int] = Field(None, description="The quantity of cards used as payment (if applicable)")
+    price_cash: Optional[float] = Field(None, description="The price in cash (if applicable)")
     traded_at: datetime = Field(..., description="The timestamp when the transaction occurred")
 
 class PayPointOfferRequest(BaseModel):
     """Request model for paying a point offer"""
     offer_id: str = Field(..., description="The ID of the offer to pay")
+
+class LikeUserRequest(BaseModel):
+    """Request model for liking another user"""
+    target_user_id: str = Field(..., description="The ID of the user to like")
+
+class LikeUserResponse(BaseModel):
+    """Response model for liking another user"""
+    success: bool
+    message: str
+    user_id: str
+    target_user_id: str
+    liked_at: datetime
 
 # Note: For file uploads, we don't use a Pydantic model
 # The avatar upload endpoint will use FastAPI's File and UploadFile directly

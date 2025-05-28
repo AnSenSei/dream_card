@@ -938,6 +938,7 @@ async def add_card_to_user(
         card_reference: Reference to master card ("collection/card_id")
         db_client: Firestore async client
         collection_metadata_id: Optional override for subcollection name
+        from_marketplace: Optional flag to indicate that the card is from the market (True)
 
     Returns:
         Success message
@@ -1230,8 +1231,14 @@ async def destroy_card(
     remaining = card.quantity - quantity
 
     # 4. Pre-fetch main card exists flag
-    main_ref = user_ref.collection('cards').document(card_id)
-    main_snap = await main_ref.get()
+    collection_meta_data = await get_collection_metadata_from_service(subcollection_name)
+    print(collection_meta_data)
+    main_card_ref = (
+        db_client
+        .collection(collection_meta_data["firestoreCollection"])
+        .document(card_id)
+    )
+    main_snap = await main_card_ref.get()
 
     @firestore.async_transactional
     async def _txn(tx: firestore.AsyncTransaction):
@@ -1240,15 +1247,12 @@ async def destroy_card(
 
         if remaining <= 0:
             tx.delete(deep_ref)
-            if main_snap.exists:
-                tx.delete(main_ref)
-            logger.info(f"Deleted card {card_id} for user {user_id}")
         else:
             tx.update(deep_ref, {"quantity": remaining})
             if main_snap.exists:
                 main_card = main_snap.to_dict()
-                main_remaining = main_card["quantity"] - quantity
-                tx.update(main_ref, {"quantity": main_remaining})
+                main_remaining = main_card["quantity"] + quantity
+                tx.update(main_card_ref, {"quantity": main_remaining})
             logger.info(f"Updated card {card_id} to quantity {remaining} for user {user_id}")
 
     txn = db_client.transaction()
