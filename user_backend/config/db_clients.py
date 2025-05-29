@@ -1,3 +1,6 @@
+from algoliasearch.search.client import SearchClient
+
+
 from google.cloud import storage
 from google.cloud import firestore
 from google.api_core.client_options import ClientOptions
@@ -43,3 +46,34 @@ def get_firestore_client():
         logger.error("Firestore client is not initialized.")
         raise RuntimeError("Firestore client is not initialized. Check Firestore configuration and credentials.")
     return firestore_client
+
+
+algolia_client = None
+
+try:
+    algolia_client = SearchClient(settings.application_id, settings.algolia_api_key)
+    logger.info(f"Successfully initialized Algolia SearchClient")
+except Exception as e:
+    logger.error(f"Failed to initialize Algolia client: {e}", exc_info=True)
+    algolia_client = None
+
+
+def get_algolia_client():
+    """Get the global Algolia client"""
+    if algolia_client is None:
+        logger.error("Algolia client is not initialized.")
+        raise RuntimeError("Algolia client is not initialized. Check Algolia configuration and credentials.")
+    return algolia_client
+
+
+async def get_algolia_index(index_name: str = None):
+    """
+    Get Algolia client and index name for search operations.
+    The v4 API uses search_single_index method with index_name parameter.
+    """
+    index_name = index_name or settings.algolia_index_name
+    client = SearchClient(settings.application_id, settings.algolia_api_key)
+
+    return client, index_name
+
+

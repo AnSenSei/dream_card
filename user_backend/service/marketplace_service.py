@@ -4,10 +4,10 @@ from datetime import datetime, timedelta
 from fastapi import HTTPException
 from google.cloud import firestore
 from google.cloud.firestore_v1 import AsyncClient, SERVER_TIMESTAMP, async_transactional, Increment
-
+from config.db_clients import get_algolia_index, get_algolia_client
 from config import get_logger, settings
-from models.schemas import CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CardListing, MarketplaceTransaction
-
+from models.schemas import CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CardListing, MarketplaceTransaction, PaginationInfo, AppliedFilters
+from models.marketplace_schemas import PaginatedListingsResponse
 from service.card_service import get_user_card, add_card_to_user
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs, parse_base64_image
 from config.db_connection import db_connection
@@ -184,7 +184,8 @@ async def create_card_listing(
             "createdAt": now,
             "pricePoints": listing_request.pricePoints,
             "priceCash": listing_request.priceCash,
-            "image_url": user_card.image_url  # Add image_url from the user's card
+            "image_url": user_card.image_url,  # Add image_url from the user's card
+            "card_name": listing_request.card_name if listing_request.card_name else user_card.card_name  # Use card_name from request or user's card
         }
 
         # Add expiration date if provided
@@ -234,7 +235,8 @@ async def create_card_listing(
             expiresAt=listing_data.get("expiresAt"),
             highestOfferPoints=listing_data.get("highestOfferPoints"),
             highestOfferCash=listing_data.get("highestOfferCash"),
-            image_url=listing_data.get("image_url")
+            image_url=listing_data.get("image_url"),
+            card_name=listing_data.get("card_name")
         )
 
         logger.info(f"Successfully created listing {new_listing_ref.id} for card {card_reference} by user {user_id}")
@@ -310,7 +312,8 @@ async def get_user_listings(
                 expiresAt=listing_data.get("expiresAt"),
                 highestOfferPoints=listing_data.get("highestOfferPoints"),
                 highestOfferCash=listing_data.get("highestOfferCash"),
-                image_url=listing_data.get("image_url")
+                image_url=listing_data.get("image_url"),
+                card_name=listing_data.get("card_name")
             )
             listings.append(listing)
 
@@ -379,7 +382,8 @@ async def get_listing_by_id(
             expiresAt=listing_data.get("expiresAt"),
             highestOfferPoints=listing_data.get("highestOfferPoints"),
             highestOfferCash=listing_data.get("highestOfferCash"),
-            image_url=listing_data.get("image_url")
+            image_url=listing_data.get("image_url"),
+            card_name=listing_data.get("card_name")
         )
 
         logger.info(f"Successfully retrieved listing {listing_id}")
@@ -783,7 +787,8 @@ async def offer_points(
             expiresAt=updated_listing_data.get("expiresAt"),
             highestOfferPoints=updated_listing_data.get("highestOfferPoints"),
             highestOfferCash=updated_listing_data.get("highestOfferCash"),
-            image_url=updated_listing_data.get("image_url")
+            image_url=updated_listing_data.get("image_url"),
+            card_name=updated_listing_data.get("card_name")
         )
 
         logger.info(f"Successfully created offer for listing {listing_id} by user {user_id}")
@@ -948,7 +953,8 @@ async def update_point_offer(
             expiresAt=updated_listing_data.get("expiresAt"),
             highestOfferPoints=updated_listing_data.get("highestOfferPoints"),
             highestOfferCash=updated_listing_data.get("highestOfferCash"),
-            image_url=updated_listing_data.get("image_url")
+            image_url=updated_listing_data.get("image_url"),
+            card_name=updated_listing_data.get("card_name")
         )
 
         logger.info(f"Successfully updated point offer {offer_id} for listing {listing_id} by user {user_id}")
@@ -1113,7 +1119,8 @@ async def update_cash_offer(
             expiresAt=updated_listing_data.get("expiresAt"),
             highestOfferPoints=updated_listing_data.get("highestOfferPoints"),
             highestOfferCash=updated_listing_data.get("highestOfferCash"),
-            image_url=updated_listing_data.get("image_url")
+            image_url=updated_listing_data.get("image_url"),
+            card_name=updated_listing_data.get("card_name")
         )
 
         logger.info(f"Successfully updated cash offer {offer_id} for listing {listing_id} by user {user_id}")
@@ -1383,7 +1390,8 @@ async def offer_cash(
             expiresAt=updated_listing_data.get("expiresAt"),
             highestOfferPoints=updated_listing_data.get("highestOfferPoints"),
             highestOfferCash=updated_listing_data.get("highestOfferCash"),
-            image_url=updated_listing_data.get("image_url")
+            image_url=updated_listing_data.get("image_url"),
+            card_name=updated_listing_data.get("card_name")
         )
 
         logger.info(f"Successfully created cash offer for listing {listing_id} by user {user_id}")
@@ -1461,70 +1469,116 @@ async def get_all_offers(user_id: str, offer_type: str, db_client: AsyncClient) 
         logger.error(f"Error getting {offer_type} offers for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get {offer_type} offers: {str(e)}")
 
+
+def get_sorted_index_name(sort_by: Optional[str], sort_order: str):
+    if sort_by == "priceCash":
+        return "listings_priceCash_desc" if sort_order == "desc" else "listings_priceCash_asc"
+    elif sort_by == "pricePoints":
+        return "listings_pricePoints_desc"
+    elif sort_by == "createdAt":
+        return "listings_createdAt_desc"
+    else:
+        return "listings"
+
+
 async def get_all_listings(
-    db_client: AsyncClient
-) -> List[CardListing]:
-    """
-    Get all listings in the marketplace.
-
-    This function:
-    1. Queries the listings collection for all documents
-    2. Converts the Firestore documents to CardListing objects
-    3. Returns a list of CardListing objects
-
-    Args:
-        db_client: Firestore async client
-
-    Returns:
-        List[CardListing]: A list of all CardListing objects
-
-    Raises:
-        HTTPException: If there's an error getting the listings
-    """
+        db_client: firestore.AsyncClient = None,
+        collection_id: Optional[str] = None,
+        per_page: int = 10,
+        sort_by: Optional[str] = None,
+        sort_order: str = "desc",
+        search_query: Optional[str] = None,
+        cursor: Optional[str] = None,
+        algolia_index=None
+) -> Any:
     try:
-        # 1. Query the listings collection for all documents
-        listings_ref = db_client.collection('listings')
+        page = int(cursor) if cursor and cursor.isdigit() else 0
 
-        # 2. Execute the query
-        listings_docs = await listings_ref.get()
+        if algolia_index:
+            client, index_name = algolia_index
+        else:
+            client = get_algolia_client()
+            index_name = get_sorted_index_name(sort_by, sort_order)
 
-        # 3. Convert the Firestore documents to CardListing objects
+        filters = []
+        if collection_id:
+            filters.append(f'collection_id:"{collection_id}"')
+        filter_str = " AND ".join(filters) if filters else None
+
+        search_params = {
+            "hitsPerPage": per_page,
+            "page": page,
+        }
+        if filter_str:
+            search_params["filters"] = filter_str
+
+        res = await client.search_single_index(
+            index_name=index_name,
+            search_params={
+                "query": search_query or "",
+                **search_params
+            }
+        )
+
+        logger.info(f"Algolia hits total: {len(res.hits)}")  # 加上这里立刻看结果
+
         listings = []
-        for doc in listings_docs:
-            listing_data = doc.to_dict()
-            listing_data['id'] = doc.id  # Add the document ID to the data
+        for hit in res.hits:
+            try:
+                hit_data = dict(hit)
+                hit_data["id"] = hit_data.get("objectID")
 
-            # Generate signed URL for the card image if it exists
-            if 'image_url' in listing_data and listing_data['image_url']:
-                try:
-                    listing_data['image_url'] = await generate_signed_url(listing_data['image_url'])
-                except Exception as sign_error:
-                    logger.error(f"Failed to generate signed URL for {listing_data['image_url']}: {sign_error}")
-                    # Keep the original URL if signing fails
+                # 增加日志查看实际返回数据
+                logger.info(f"Hit data before parsing: {hit_data}")
 
-            # Create a CardListing object
-            listing = CardListing(
-                id=listing_data["id"],  # Include the listing ID
-                owner_reference=listing_data["owner_reference"],
-                card_reference=listing_data["card_reference"],
-                collection_id=listing_data.get("collection_id", ""),
-                quantity=listing_data["quantity"],
-                createdAt=listing_data["createdAt"],
-                pricePoints=listing_data.get("pricePoints"),
-                priceCash=listing_data.get("priceCash"),
-                expiresAt=listing_data.get("expiresAt"),
-                highestOfferPoints=listing_data.get("highestOfferPoints"),
-                highestOfferCash=listing_data.get("highestOfferCash"),
-                image_url=listing_data.get("image_url")
-            )
-            listings.append(listing)
+                if "createdAt" in hit_data:
+                    hit_data["createdAt"] = datetime.fromtimestamp(hit_data["createdAt"] / 1000)
 
-        logger.info(f"Successfully retrieved {len(listings)} listings")
-        return listings
+                if "expiresAt" in hit_data:
+                    hit_data["expiresAt"] = datetime.fromtimestamp(hit_data["expiresAt"] / 1000)
+
+                if hit_data.get("image_url"):
+                    try:
+                        hit_data["image_url"] = await generate_signed_url(hit_data["image_url"])
+                    except Exception as e:
+                        logger.warning(f"Image signing failed for {hit_data['id']}: {e}")
+
+                required_fields = ["owner_reference", "card_reference", "collection_id", "quantity", "createdAt"]
+                missing_fields = [f for f in required_fields if f not in hit_data]
+                if missing_fields:
+                    logger.warning(f"Skipping due to missing fields {missing_fields}: {hit_data}")
+                    continue
+
+                listings.append(CardListing(**hit_data))
+
+            except Exception as e:
+                logger.warning(f"Failed to parse hit {hit_data.get('id')}: {e}")
+                continue
+
+        pagination_info = PaginationInfo(
+            total_items=res.nb_hits,
+            items_per_page=per_page,
+            total_pages=res.nb_pages
+        )
+
+        filters_info = AppliedFilters(
+            sort_by=sort_by or "",
+            sort_order=sort_order,
+            search_query=search_query,
+            collection_id=collection_id
+        )
+
+        return PaginatedListingsResponse(
+            listings=listings,
+            pagination=pagination_info,
+            filters=filters_info,
+            next_cursor=str(page + 1) if (page + 1 < res.nb_pages) else None
+        )
 
     except Exception as e:
-        logger.error(f"Error getting all listings: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get listings: {str(e)}")
+        logger.error(f"Error fetching listings from Algolia: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get listings.")
+
 
 async def get_accepted_offers(user_id: str, offer_type: str, db_client: AsyncClient) -> List[Dict[str, Any]]:
     """

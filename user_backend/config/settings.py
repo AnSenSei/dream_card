@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     stripe_api_key: str
     stripe_webhook_secret: str
 
+    #Algolia
+    application_id: str
+    algolia_api_key: str
+    algolia_index_name: str
+
     #shippo API KEY
     shippo_api_key: str
 

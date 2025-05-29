@@ -1,10 +1,12 @@
-from fastapi import APIRouter, HTTPException, Depends, Path, Body
+from fastapi import APIRouter, HTTPException, Depends, Path, Body, Query
 from google.cloud import firestore
-from typing import List
+from typing import List, Optional
 
 from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest, AcceptedOffersResponse, AllOffersResponse, PayPointOfferRequest, MarketplaceTransaction
+from models.marketplace_schemas import PaginatedListingsResponse
 from service.marketplace_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer, get_accepted_offers, get_all_offers, pay_point_offer, get_all_listings, get_user_marketplace_transactions
 from config import get_firestore_client, get_logger
+from config.db_clients import get_algolia_index
 
 logger = get_logger(__name__)
 
@@ -445,20 +447,47 @@ listings_router = APIRouter(
     tags=["marketplace"],
 )
 
-@listings_router.get("/listings", response_model=List[CardListing])
+@listings_router.get("/listings", response_model=PaginatedListingsResponse)
 async def get_all_listings_route(
-    db: firestore.AsyncClient = Depends(get_firestore_client)
+    collection_id: Optional[str] = Query(None, description="Filter listings by collection ID"),
+    per_page: int = Query(10, ge=1, le=100, description="Items per page"),
+    sort_by: Optional[str] = Query(None, description="Sort by field (priceCash or pricePoints)"),
+    sort_order: str = Query("desc", description="Sort direction (asc or desc)"),
+    search_query: Optional[str] = Query(None, description="Search by card name"),
+    cursor: Optional[str] = Query(None, description="Cursor for pagination (ID of the last document in the previous page)"),
+    db: firestore.AsyncClient = Depends(get_firestore_client),
+    algolia_index = Depends(get_algolia_index)
 ):
     """
-    Get all listings in the marketplace.
+    Get all listings in the marketplace with filtering, pagination, and sorting.
 
     This endpoint:
-    1. Retrieves all listings from the marketplace
-    2. Returns a list of all listings with their details
+    1. Retrieves listings from the marketplace with optional filtering by collection_id
+    2. Filters listings by card_name if search_query is provided
+    3. Applies sorting by priceCash or pricePoints if specified
+    4. Applies cursor-based pagination
+    5. Returns a paginated list of listings with pagination info, applied filters, and a cursor for the next page
+
+    Args:
+        collection_id: Optional filter by collection ID
+        per_page: Number of items per page (between 1 and 100)
+        sort_by: Field to sort by (priceCash or pricePoints)
+        sort_order: Sort direction (asc or desc)
+        search_query: Optional search query to filter listings by card name
+        cursor: Cursor for pagination (ID of the last document in the previous page)
     """
     try:
-        listings = await get_all_listings(db_client=db)
-        return listings
+        result = await get_all_listings(
+            db_client=db,  # Still pass db_client for backward compatibility
+            collection_id=collection_id,
+            per_page=per_page,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            search_query=search_query,
+            cursor=cursor,
+            algolia_index=algolia_index  # Pass the Algolia index
+        )
+        return result
     except HTTPException:
         raise
     except Exception as e:

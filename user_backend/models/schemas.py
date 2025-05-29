@@ -43,10 +43,10 @@ class User(BaseModel):
 
 class PaginationInfo(BaseModel):
     """Pagination information for list responses"""
-    total_items: int
+    total_items: Optional[int] = None
     items_per_page: int
-    current_page: int
-    total_pages: int
+    current_page: Optional[int] = None  # Not used with cursor pagination
+    total_pages: Optional[int] = None
 
 class UserCard(BaseModel):
     """Model for a card in a user's collection"""
@@ -79,9 +79,10 @@ class CardWithPointsRequest(BaseModel):
 
 class AppliedFilters(BaseModel):
     """Filters applied to a card list query"""
-    sort_by: str
-    sort_order: str
+    sort_by: Optional[str] = None
+    sort_order: str = "desc"
     search_query: Optional[str] = None
+    collection_id: Optional[str] = None
 
 class UserCardListResponse(BaseModel):
     """Response model for listing user cards by subcollection"""
@@ -180,6 +181,7 @@ class CardListing(BaseModel):
     highestOfferPoints: Optional[Dict[str, Any]] = None  # Highest offer in points
     highestOfferCash: Optional[Dict[str, Any]] = None  # Highest offer in cash
     image_url: Optional[str] = None  # URL of the card image
+    card_name: Optional[str] = None  # Name of the card
 
     class Config:
         from_attributes = True
@@ -192,6 +194,7 @@ class CreateCardListingRequest(BaseModel):
     pricePoints: Optional[int] = None
     priceCash: Optional[float] = None
     expiresAt: Optional[datetime] = None
+    card_name: Optional[str] = None
 
 class OfferPointsRequest(BaseModel):
     """Request model for offering points for a listing"""
