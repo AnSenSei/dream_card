@@ -993,6 +993,14 @@ async def add_card_to_user(
     # Pre-fetch existence flags
     existing_deep = await deep_ref.get()
 
+    # 5.1 Set up reference for expiring cards collection if needed
+    expiring_card_ref = None
+    expiring_card_exists = False
+    if user_card_data["point_worth"] < 1000:
+        expiring_cards_collection = db_client.collection('expiring_cards')
+        expiring_card_ref = expiring_cards_collection.document(f"{user_id}_{card_id}")
+        expiring_card_doc = await expiring_card_ref.get()
+        expiring_card_exists = expiring_card_doc.exists
     @firestore.async_transactional
     async def _txn(tx: firestore.AsyncTransaction):
         # Decrease the quantity of the original card by 1 (allows negative quantity)
@@ -1008,9 +1016,37 @@ async def add_card_to_user(
                 "quantity": firestore.Increment(1),
                 "buybackexpiresAt": now + timedelta(days=settings.card_buyback_expire_days)
             })
+            if user_card_data["expireAt"]:
+                tx.update(deep_ref,{
+                    "expireAt": now +timedelta(days = settings.card_expire_days)
+                })
         else:
             # First-time set
             tx.set(deep_ref, user_card_data)
+
+        # Add to expiring cards collection if needed
+
+        if expiring_card_ref is not None:
+            # The path to the user's card
+            card_path = f"users/{user_id}/cards/cards/{subcol}/{card_id}"
+
+            if expiring_card_exists and existing_deep.exists:
+                # Update the existing document with new expiration time
+                tx.update(expiring_card_ref, {
+                    "expiresAt": user_card_data["expireAt"],
+                    # Increment quantity if the card already exists
+                    "quantity": firestore.Increment(1)
+                })
+                logger.info(f"Updated card in expiring_cards collection with ID {user_id}_{card_id}")
+            else:
+                # Add to expiring cards collection
+                tx.set(expiring_card_ref, {
+                    "userId": user_id,
+                    "cardReference": card_path,
+                    "expiresAt": user_card_data["expireAt"],
+                    "quantity": 1
+                })
+                logger.info(f"Added card to expiring_cards collection with ID {user_id}_{card_id}")
 
         logger.info(f"Card stored at users/{user_id}/cards/cards/{subcol}/{card_id}")
         logger.info(f"Decreased quantity of original card {card_reference} by 1")

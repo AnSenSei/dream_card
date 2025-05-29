@@ -15,6 +15,9 @@ class CardPack(BaseModel):
     max_win: Optional[int] = None
     min_win: Optional[int] = None
     popularity: Optional[int] = 0
+    price: Optional[int] = None
+    created_at: Optional[Any] = None
+    is_active: Optional[bool] = None
 
 class AddPackRequest(BaseModel):
     """
@@ -108,3 +111,23 @@ class DeleteCardFromPackRequest(BaseModel):
     """
     collection_metadata_id: str
     document_id: str
+
+class PaginationInfo(BaseModel):
+    """Pagination information for list responses"""
+    total_items: int
+    total_pages: int
+    current_page: int
+    per_page: int
+
+class AppliedFilters(BaseModel):
+    """Filters applied to a pack list query"""
+    sort_by: Optional[str] = None
+    sort_order: str = "desc"
+    search_query: Optional[str] = None
+
+class PaginatedPacksResponse(BaseModel):
+    """Response model for paginated packs"""
+    packs: List[CardPack]
+    pagination: PaginationInfo
+    filters: AppliedFilters
+    next_cursor: Optional[str] = None  # Cursor for the next page

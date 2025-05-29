@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     #shippo API KEY
     shippo_api_key: str
 
+    #mailgun api
+    mailgun_api: str
+
     # Database connection settings
     db_instance_connection_name: str
     db_user: str

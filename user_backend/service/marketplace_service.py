@@ -1,5 +1,6 @@
 from typing import Optional, Dict, List, Tuple, Any
 from datetime import datetime, timedelta
+import requests
 
 from fastapi import HTTPException
 from google.cloud import firestore
@@ -9,10 +10,68 @@ from config import get_logger, settings
 from models.schemas import CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CardListing, MarketplaceTransaction, PaginationInfo, AppliedFilters
 from models.marketplace_schemas import PaginatedListingsResponse
 from service.card_service import get_user_card, add_card_to_user
+from service.user_service import get_user_by_id
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs, parse_base64_image
 from config.db_connection import db_connection
 
 logger = get_logger(__name__)
+
+async def send_offer_accepted_email(to_email: str, to_name: str, listing_data: dict, offer_type: str, offer_amount: float or int):
+    """
+    Send an email notification to a user when their offer has been accepted.
+
+    Args:
+        to_email: The email address of the recipient
+        to_name: The name of the recipient
+        listing_data: Dictionary containing listing information
+        offer_type: Type of offer ("cash" or "point")
+        offer_amount: Amount of the offer
+
+    Returns:
+        The response from the Mailgun API
+
+    Raises:
+        HTTPException: If there's an error sending the email
+    """
+    try:
+        # Format the offer amount based on type
+        formatted_amount = f"${offer_amount:.2f}" if offer_type.lower() == "cash" else f"{offer_amount} points"
+
+        # Construct the email subject and body
+        subject = f"Your offer for {listing_data.get('card_name', 'a card')} has been accepted!"
+        text = f"""Hello {to_name},
+
+Great news! Your {offer_type} offer of {formatted_amount} for {listing_data.get('card_name', 'a card')} has been accepted.
+
+Please complete the payment within the next 48 hours to finalize the transaction.
+
+Thank you for using our marketplace!
+
+The Chouka Cards Team
+"""
+
+        # Send the email using Mailgun API
+        response = requests.post(
+            "https://api.mailgun.net/v3/sandbox8cfcd36a145642ff953f9280ab213285.mailgun.org/messages",
+            auth=("api", settings.mailgun_api),
+            data={
+                "from": "Chouka Cards <postmaster@mg.zapull.fun>",
+                "to": f"{to_name} <{to_email}>",
+                "subject": subject,
+                "text": text
+            }
+        )
+
+        if response.status_code != 200:
+            logger.error(f"Failed to send email: {response.text}")
+            return None
+
+        logger.info(f"Successfully sent offer accepted email to {to_email}")
+        return response
+
+    except Exception as e:
+        logger.error(f"Error sending offer accepted email: {e}", exc_info=True)
+        return None
 
 async def withdraw_listing(
     user_id: str,
@@ -673,10 +732,12 @@ async def offer_points(
     This function:
     1. Verifies the listing exists
     2. Verifies the user exists
-    3. Creates a new offer document in the "point_offers" subcollection under the listing
-    4. Creates a new offer document in the "my_point_offers" subcollection under the user
-    5. If it's the highest offer, updates the highestOfferPoint field in the listing document
-    6. Returns the updated listing
+    3. Checks if the user is the owner of the listing
+    4. Checks if the listing already has an accepted offer
+    5. Creates a new offer document in the "point_offers" subcollection under the listing
+    6. Creates a new offer document in the "my_point_offers" subcollection under the user
+    7. If it's the highest offer, updates the highestOfferPoint field in the listing document
+    8. Returns the updated listing
 
     Args:
         user_id: The ID of the user making the offer
@@ -714,7 +775,11 @@ async def offer_points(
         if owner_reference == expected_owner_path:
             raise HTTPException(status_code=400, detail="You cannot offer points for your own listing")
 
-        # 4. Create a new offer document in the "point_offers" subcollection
+        # 4. Check if the listing already has an accepted offer
+        if listing_data.get("status") == "accepted":
+            raise HTTPException(status_code=400, detail="This listing already has an accepted offer")
+
+        # 5. Create a new offer document in the "point_offers" subcollection
         now = datetime.now()
         expires_at = now + timedelta(days=expired)  # Calculate expiration date
 
@@ -744,14 +809,14 @@ async def offer_points(
             "image_url": listing_data.get("image_url", "")  # Image URL from the listing
         }
 
-        # 5. Check if this is the highest offer
+        # 6. Check if this is the highest offer
         current_highest_offer = listing_data.get("highestOfferPoints", None)
         is_highest_offer = False
 
         if current_highest_offer is None or offer_request.points > current_highest_offer.get("amount", 0):
             is_highest_offer = True
 
-        # 6. Update the listing and create the offer in a transaction
+        # 7. Update the listing and create the offer in a transaction
         @firestore.async_transactional
         async def _txn(tx: firestore.AsyncTransaction):
             # Create the offer in the listing's offers subcollection
@@ -1144,10 +1209,12 @@ async def accept_offer(
 
     This function:
     1. Verifies the listing exists and belongs to the user
-    2. Finds the highest offer of the specified type
-    3. Updates the status of the offer to "accepted"
-    4. Sets the payment_due date to 2 days after the accept time
-    5. Returns the updated listing
+    2. Checks if the listing status is already "accepted"
+    3. Finds the highest offer of the specified type
+    4. Updates the status of the offer to "accepted"
+    5. Sets the payment_due date to 2 days after the accept time
+    6. Sets the expireAt date to 48 hours after the accept time
+    7. Returns the updated listing
 
     Args:
         user_id: The ID of the user accepting the offer (must be the listing owner)
@@ -1179,7 +1246,11 @@ async def accept_offer(
         if owner_reference != expected_owner_path:
             raise HTTPException(status_code=403, detail="You can only accept offers for your own listings")
 
-        # 3. Find the highest offer of the specified type
+        # 3. Check if the listing status is already "accepted"
+        if listing_data.get("status") == "accepted":
+            raise HTTPException(status_code=400, detail="This listing already has an accepted offer")
+
+        # 4. Find the highest offer of the specified type
         # Handle both singular and plural forms of "point"
         if offer_type.lower() == "point":
             highest_offer_field = "highestOfferPoints"
@@ -1191,9 +1262,10 @@ async def accept_offer(
         if not highest_offer:
             raise HTTPException(status_code=404, detail=f"No {offer_type} offers found for this listing")
 
-        # 4. Set the accept time and payment due date
+        # 5. Set the accept time, payment due date, and expiration date
         now = datetime.now()
         payment_due = now + timedelta(days=2)  # Payment due in 2 days
+        expires_at = now + timedelta(hours=48)  # Listing expires in 48 hours
 
         # 5. Update the offer status in the listing
         highest_offer["status"] = "accepted"
@@ -1228,7 +1300,8 @@ async def accept_offer(
             tx.update(listing_ref, {
                 highest_offer_field: highest_offer,
                 "status": "accepted",
-                "payment_due": payment_due
+                "payment_due": payment_due,
+                "expiresAt": expires_at
             })
 
             # Update the offer in the listing's offers subcollection
@@ -1253,6 +1326,33 @@ async def accept_offer(
         updated_listing_data = updated_listing_doc.to_dict()
         updated_listing_data['id'] = listing_id  # Add the listing ID to the data
 
+        # 9. Send email notification to the user whose offer was accepted
+        try:
+            # Extract offerer user ID from the reference path
+            offerer_id = offerer_ref_path.split('/')[-1]
+
+            # Get the offerer's user details
+            offerer = await get_user_by_id(offerer_id, db_client)
+
+            if offerer and offerer.email:
+                # Get the offer amount
+                offer_amount = highest_offer.get("amount", 0)
+
+                # Send the email notification
+                await send_offer_accepted_email(
+                    to_email=offerer.email,
+                    to_name=offerer.displayName,
+                    listing_data=updated_listing_data,
+                    offer_type=offer_type,
+                    offer_amount=offer_amount
+                )
+                logger.info(f"Sent offer accepted email to {offerer.email}")
+            else:
+                logger.warning(f"Could not send email notification: User {offerer_id} not found or has no email")
+        except Exception as e:
+            # Log the error but don't fail the whole operation if email sending fails
+            logger.error(f"Error sending offer accepted email: {e}", exc_info=True)
+
         logger.info(f"Successfully accepted {offer_type} offer for listing {listing_id}")
         return CardListing(**updated_listing_data)
 
@@ -1275,10 +1375,12 @@ async def offer_cash(
     This function:
     1. Verifies the listing exists
     2. Verifies the user exists
-    3. Creates a new offer document in the "cash_offers" subcollection under the listing
-    4. Creates a new offer document in the "my_cash_offers" subcollection under the user
-    5. If it's the highest offer, updates the highestOfferCash field in the listing document
-    6. Returns the updated listing
+    3. Checks if the user is the owner of the listing
+    4. Checks if the listing already has an accepted offer
+    5. Creates a new offer document in the "cash_offers" subcollection under the listing
+    6. Creates a new offer document in the "my_cash_offers" subcollection under the user
+    7. If it's the highest offer, updates the highestOfferCash field in the listing document
+    8. Returns the updated listing
 
     Args:
         user_id: The ID of the user making the offer
@@ -1316,7 +1418,11 @@ async def offer_cash(
         if owner_reference == expected_owner_path:
             raise HTTPException(status_code=400, detail="You cannot offer cash for your own listing")
 
-        # 4. Create a new offer document in the "cash_offers" subcollection
+        # 4. Check if the listing already has an accepted offer
+        if listing_data.get("status") == "accepted":
+            raise HTTPException(status_code=400, detail="This listing already has an accepted offer")
+
+        # 5. Create a new offer document in the "cash_offers" subcollection
         now = datetime.now()
         expires_at = now + timedelta(days=expired)  # Calculate expiration date
 
@@ -1346,7 +1452,7 @@ async def offer_cash(
             "image_url": listing_data.get("image_url", "")  # Image URL from the listing
         }
 
-        # 5. Check if this is the highest offer
+        # 6. Check if this is the highest offer
         highest_offer_field = "highestOfferCash"
         current_highest_offer = listing_data.get(highest_offer_field, None)
         is_highest_offer = False
@@ -1354,7 +1460,7 @@ async def offer_cash(
         if current_highest_offer is None or offer_request.cash > current_highest_offer.get("amount", 0):
             is_highest_offer = True
 
-        # 6. Update the listing and create the offer in a transaction
+        # 7. Update the listing and create the offer in a transaction
         @firestore.async_transactional
         async def _txn(tx: firestore.AsyncTransaction):
             # Create the offer in the listing's cash_offers subcollection

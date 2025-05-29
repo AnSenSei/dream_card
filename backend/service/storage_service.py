@@ -219,11 +219,10 @@ async def process_new_card_submission(
         doc_snapshot = await doc_ref.get()
 
         if doc_snapshot.exists:
-            logger.error(f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'.")
-            raise HTTPException(
-                status_code=409,  # 409 Conflict is more appropriate than 500
-                detail=f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'."
-            )
+            logger.info(f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'. Updating quantity.")
+            # Update the quantity of the existing card instead of raising an exception
+            updated_card = await update_card_quantity(card_name, quantity, effective_collection_name)
+            return updated_card
 
         # Generate a signed URL for the image
         try:
