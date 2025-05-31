@@ -352,10 +352,26 @@ class PackOpeningHistoryResponse(BaseModel):
     pack_openings: List[PackOpeningHistory]
     total_count: int
 
+class UpdateWithdrawRequestStatusRequest(BaseModel):
+    """Request model for updating withdraw request status"""
+    status: str = Field(..., description="The new status for the withdraw request (e.g., 'pending', 'label_created', 'shipped', 'delivered')")
+    shipping_status: str = Field(..., description="The new shipping status for the withdraw request (e.g., 'label_created', 'shipped', 'delivered')")
+
 class WithdrawRequestsResponse(BaseModel):
     """Response model for listing withdraw requests with pagination"""
     withdraw_requests: List[WithdrawRequest]
     pagination: PaginationInfo
+
+class CursorPaginationInfo(BaseModel):
+    """Cursor-based pagination information for list responses"""
+    next_cursor: Optional[str] = None  # Cursor for the next page, null if no more pages
+    limit: int  # Number of items per page
+    has_more: bool = False  # Whether there are more items to fetch
+
+class AllWithdrawRequestsResponse(BaseModel):
+    """Response model for listing all withdraw requests with cursor pagination"""
+    withdraw_requests: List[WithdrawRequest]
+    pagination: CursorPaginationInfo
 
 class MarketplaceTransaction(BaseModel):
     """Model for a marketplace transaction"""

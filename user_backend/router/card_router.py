@@ -3,7 +3,9 @@ from typing import Optional, List, Dict, Any
 from google.cloud import firestore
 from pydantic import BaseModel
 
-from models.schemas import UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest, PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse, WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse, WithdrawRequestsResponse
+from models.schemas import (UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest,
+                            PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse,
+                            WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse, WithdrawRequestsResponse)
 from service.card_service import (
     add_multiple_cards_to_user,
     draw_card_from_pack,
@@ -303,41 +305,41 @@ async def withdraw_multiple_cards_route(
         logger.error(f"Error creating withdraw request for multiple cards for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while creating the withdraw request")
 
-@router.post("/{user_id}/cards/{card_id}/withdraw-ship", response_model=UserCard)
-async def withdraw_ship_card_route(
-    user_id: str = Path(...),
-    card_id: str = Path(...),
-    subcollection_name: str = Query(..., description="The name of the subcollection where the card is stored"),
-    quantity: int = Query(1, description="The quantity to withdraw (default: 1)"),
-    db: firestore.AsyncClient = Depends(get_firestore_client)
-):
-    """
-    Create a withdraw request for a card from a user's collection.
-
-    This endpoint:
-    1. Takes a user ID, card ID, subcollection name, and quantity as arguments
-    2. Creates a new withdraw request with fields for request date and status
-    3. Creates a "cards" subcollection under the withdraw request to store the withdrawn card
-    4. If quantity is less than the card's quantity, only withdraws the specified quantity
-    5. Only removes the card from the original subcollection if the remaining quantity is 0
-    6. Returns the updated card from the withdraw request
-
-    Note: For withdrawing multiple cards at once, use the /users/{user_id}/cards/withdraw endpoint.
-    """
-    try:
-        withdrawn_card = await withdraw_ship_card(
-            user_id=user_id,
-            card_id=card_id,
-            subcollection_name=subcollection_name,
-            db_client=db,
-            quantity=quantity
-        )
-        return withdrawn_card
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating withdraw request for card for user: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="An error occurred while creating the withdraw request")
+# @router.post("/{user_id}/cards/{card_id}/withdraw-ship", response_model=UserCard)
+# async def withdraw_ship_card_route(
+#     user_id: str = Path(...),
+#     card_id: str = Path(...),
+#     subcollection_name: str = Query(..., description="The name of the subcollection where the card is stored"),
+#     quantity: int = Query(1, description="The quantity to withdraw (default: 1)"),
+#     db: firestore.AsyncClient = Depends(get_firestore_client)
+# ):
+#     """
+#     Create a withdraw request for a card from a user's collection.
+#
+#     This endpoint:
+#     1. Takes a user ID, card ID, subcollection name, and quantity as arguments
+#     2. Creates a new withdraw request with fields for request date and status
+#     3. Creates a "cards" subcollection under the withdraw request to store the withdrawn card
+#     4. If quantity is less than the card's quantity, only withdraws the specified quantity
+#     5. Only removes the card from the original subcollection if the remaining quantity is 0
+#     6. Returns the updated card from the withdraw request
+#
+#     Note: For withdrawing multiple cards at once, use the /users/{user_id}/cards/withdraw endpoint.
+#     """
+#     try:
+#         withdrawn_card = await withdraw_ship_card(
+#             user_id=user_id,
+#             card_id=card_id,
+#             subcollection_name=subcollection_name,
+#             db_client=db,
+#             quantity=quantity
+#         )
+#         return withdrawn_card
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Error creating withdraw request for card for user: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail="An error occurred while creating the withdraw request")
 
 @router.get("/{user_id}/cards/{collection_id}/{card_id}", response_model=UserCard)
 async def get_user_card_route(
@@ -654,6 +656,10 @@ async def get_withdraw_request_by_id_route(
     except Exception as e:
         logger.error(f"Error getting withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while retrieving the withdraw request")
+
+
+
+
 
 
 @router.get("/{user_id}/pack-opening-history", response_model=PackOpeningHistoryResponse)

@@ -1229,6 +1229,7 @@ async def destroy_card(
     Destroy a card from a user's collection and add its point_worth to the user's pointsBalance.
     If quantity is less than the card's quantity, only reduce the quantity.
     Only remove the card if the remaining quantity is 0.
+    Also checks if the card exists in expiring_cards collection and updates it accordingly.
 
     Returns:
         Tuple of (updated_user_model, destroyed_card_model)
@@ -1276,6 +1277,15 @@ async def destroy_card(
     )
     main_snap = await main_card_ref.get()
 
+    # 4.1 Check if card exists in expiring_cards collection
+    expiring_card_ref = None
+    expiring_card_exists = False
+    if card.point_worth < 1000:
+        expiring_cards_collection = db_client.collection('expiring_cards')
+        expiring_card_ref = expiring_cards_collection.document(f"{user_id}_{card_id}")
+        expiring_card_doc = await expiring_card_ref.get()
+        expiring_card_exists = expiring_card_doc.exists
+
     @firestore.async_transactional
     async def _txn(tx: firestore.AsyncTransaction):
         # Add points to user balance
@@ -1290,6 +1300,17 @@ async def destroy_card(
                 main_remaining = main_card["quantity"] + quantity
                 tx.update(main_card_ref, {"quantity": main_remaining})
             logger.info(f"Updated card {card_id} to quantity {remaining} for user {user_id}")
+
+        # Update expiring_cards collection if needed
+        if expiring_card_exists:
+            if remaining <= 0:
+                tx.delete(expiring_card_ref)
+                logger.info(f"Deleted card from expiring_cards collection with ID {user_id}_{card_id}")
+            else:
+                tx.update(expiring_card_ref, {
+                    "quantity": firestore.Increment(-quantity)
+                })
+                logger.info(f"Updated card in expiring_cards collection with ID {user_id}_{card_id}, reduced quantity by {quantity}")
 
     txn = db_client.transaction()
     await _txn(txn)
@@ -1924,6 +1945,58 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
 
             withdrawn_cards.append(withdrawn_card)
 
+        # Now that the transaction is complete, create an entry in the card_shipping collection
+        try:
+            # Create a document in the card_shipping collection
+            card_shipping_ref = db_client.collection('card_shipping').document(new_request_ref.id)
+
+            # Get the withdraw request data
+            request_doc = await new_request_ref.get()
+            request_data = request_doc.to_dict()
+
+            # Prepare the card shipping data
+            card_shipping_data = {
+                'request_id': new_request_ref.id,
+                'user_id': user_id,
+                'request_date': request_data.get('request_date'),
+                'status': request_data.get('status', 'pending'),
+                'shipping_address': shipping_address,
+                'shipping_status': request_data.get('shipping_status', 'pending'),
+                'card_count': len(cards_data),
+                'created_at': datetime.now(),
+                'phone_number': phone_number
+            }
+
+            # Add the cards data to the card shipping document
+            cards_list = []
+            for card_data in cards_data:
+                card_id = card_data['card_id']
+                request_card_ref = card_data['request_card_ref']
+                request_card_doc = await request_card_ref.get()
+                request_card_data = request_card_doc.to_dict()
+
+                card_info = {
+                    'card_id': card_id,
+                    'card_reference': request_card_data.get('card_reference', ''),
+                    'card_name': request_card_data.get('card_name', ''),
+                    'quantity': request_card_data.get('quantity', 0),
+                    'image_url': request_card_data.get('image_url', ''),
+                    'rarity': request_card_data.get('rarity', 1),
+                    'point_worth': request_card_data.get('point_worth', 0)
+                }
+                cards_list.append(card_info)
+
+            card_shipping_data['cards'] = cards_list
+
+            # Set the card shipping document
+            await card_shipping_ref.set(card_shipping_data)
+
+            logger.info(f"Successfully created card shipping entry for withdraw request {new_request_ref.id}")
+        except Exception as e:
+            logger.error(f"Error creating card shipping entry for withdraw request {new_request_ref.id}: {e}", exc_info=True)
+            # Don't raise an exception here, just log the error and continue
+            # The withdraw request was created successfully, but the card shipping entry creation failed
+
         # Now that the transaction is complete, create a shipment using Shippo API
         try:
             # Initialize the Shippo SDK with API key
@@ -2021,6 +2094,19 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
                 'tracking_url': shippo_transaction.tracking_url_provider,
                 'shipping_status': 'label_created'
             })
+
+            await card_shipping_ref.update({
+                'shippo_address_id': shippo_address.object_id,
+                'shippo_parcel_id': shippo_parcel.object_id,
+                'shippo_shipment_id': shippo_shipment.object_id,
+                'shippo_transaction_id': shippo_transaction.object_id,
+                'shippo_label_url': shippo_transaction.label_url,
+                'tracking_number': shippo_transaction.tracking_number,
+                'tracking_url': shippo_transaction.tracking_url_provider,
+                'shipping_status': 'label_created'
+            })
+
+
 
             logger.info(f"Successfully created shipment for withdraw request {new_request_ref.id}")
         except Exception as e:
@@ -2386,6 +2472,48 @@ async def withdraw_ship_card(user_id: str, card_id: str, subcollection_name: str
             withdrawn_card.buybackexpiresAt = updated_request_card_data["buybackexpiresAt"]
         if "request_date" in updated_request_card_data:
             withdrawn_card.request_date = updated_request_card_data["request_date"]
+
+        # Create an entry in the card_shipping collection
+        try:
+            # Create a document in the card_shipping collection
+            card_shipping_ref = db_client.collection('card_shipping').document(new_request_ref.id)
+
+            # Get the withdraw request data
+            request_doc = await new_request_ref.get()
+            request_data = request_doc.to_dict()
+
+            # Prepare the card shipping data
+            card_shipping_data = {
+                'request_id': new_request_ref.id,
+                'user_id': user_id,
+                'request_date': request_data.get('request_date'),
+                'status': request_data.get('status', 'pending'),
+                'shipping_status': 'pending',
+                'card_count': 1,
+                'created_at': datetime.now()
+            }
+
+            # Add the card data to the card shipping document
+            card_info = {
+                'card_id': card_id,
+                'card_reference': updated_request_card_data.get('card_reference', ''),
+                'card_name': updated_request_card_data.get('card_name', ''),
+                'quantity': updated_request_card_data.get('quantity', 0),
+                'image_url': updated_request_card_data.get('image_url', ''),
+                'rarity': updated_request_card_data.get('rarity', 1),
+                'point_worth': updated_request_card_data.get('point_worth', 0)
+            }
+
+            card_shipping_data['cards'] = [card_info]
+
+            # Set the card shipping document
+            await card_shipping_ref.set(card_shipping_data)
+
+            logger.info(f"Successfully created card shipping entry for withdraw request {new_request_ref.id}")
+        except Exception as e:
+            logger.error(f"Error creating card shipping entry for withdraw request {new_request_ref.id}: {e}", exc_info=True)
+            # Don't raise an exception here, just log the error and continue
+            # The withdraw request was created successfully, but the card shipping entry creation failed
 
         # Log success message
         if remaining_quantity <= 0:
@@ -2819,6 +2947,10 @@ async def get_withdraw_request_by_id(request_id: str, user_id: str, db_client: A
     except Exception as e:
         logger.error(f"Error getting withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get withdraw request: {str(e)}")
+
+
+
+
 
 
 async def get_user_pack_opening_history(user_id: str, page: int = 1, per_page: int = 10) -> Dict[str, Any]:

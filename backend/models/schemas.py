@@ -1,6 +1,23 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
 from pydantic import validator
+from datetime import datetime
+
+
+class UserCard(BaseModel):
+    """Model for a card in a user's collection"""
+    card_reference: str  # Reference to the original card
+    card_name: str
+    date_got: datetime
+    id: str
+    image_url: str
+    point_worth: int
+    quantity: int
+    rarity: int
+    locked_quantity: int = 0  # Quantity locked for listings
+    expireAt: Optional[datetime] = None
+    buybackexpiresAt: Optional[datetime] = None
+    request_date: Optional[datetime] = None  # Timestamp for when card was requested for shipping
 
 class CollectionMetadata(BaseModel):
     """
@@ -88,3 +105,72 @@ class AddPackRequest(BaseModel):
     # The keys are rarity_level strings (e.g., "Common", "Legendary_Rare_EX_Tier_SSJ4_GODMODE")
     # The values are RarityDetail objects containing the data for that rarity.
     rarities_config: Dict[str, RarityDetail]
+
+# --- Models for withdraw requests ---
+class WithdrawRequest(BaseModel):
+    """Model for a withdraw request in the list of all withdraw requests"""
+    id: str = Field(..., description="The ID of the withdraw request")
+    created_at: datetime = Field(..., description="The timestamp when the withdraw request was created")
+    request_date: datetime = Field(..., description="The timestamp when the withdraw request was made")
+    status: str = Field(..., description="The status of the withdraw request (e.g., 'pending', 'label_created', 'shipped', 'delivered')")
+    user_id: str = Field(..., description="The ID of the user who made the withdraw request")
+    card_count: Optional[int] = Field(None, description="The number of cards in this withdraw request")
+    shipping_address: Optional[Dict[str, Any]] = Field(None, description="The shipping address for this withdraw request")
+    shippo_address_id: Optional[str] = Field(None, description="The Shippo address ID")
+    shippo_parcel_id: Optional[str] = Field(None, description="The Shippo parcel ID")
+    shippo_shipment_id: Optional[str] = Field(None, description="The Shippo shipment ID")
+    shippo_transaction_id: Optional[str] = Field(None, description="The Shippo transaction ID for label purchase")
+    shippo_label_url: Optional[str] = Field(None, description="The URL for the shipping label PDF")
+    tracking_number: Optional[str] = Field(None, description="The tracking number for the shipment")
+    tracking_url: Optional[str] = Field(None, description="The URL for tracking the shipment")
+    shipping_status: Optional[str] = Field(None, description="The status of the shipment (e.g., 'label_created', 'shipped', 'delivered')")
+    cards: List[UserCard] = Field(..., description="The cards in this withdraw request")
+
+class CursorPaginationInfo(BaseModel):
+    """Cursor-based pagination information for list responses"""
+    next_cursor: Optional[str] = None  # Cursor for the next page, null if no more pages
+    limit: int  # Number of items per page
+    has_more: bool = False  # Whether there are more items to fetch
+
+class UserCard(BaseModel):
+    """Model for a card in a user's collection"""
+    card_reference: str  # Reference to the original card
+    card_name: str
+    date_got: datetime
+    id: str
+    image_url: str
+    point_worth: int
+    quantity: int
+    rarity: int
+    locked_quantity: int = 0  # Quantity locked for listings
+    expireAt: Optional[datetime] = None
+    buybackexpiresAt: Optional[datetime] = None
+    request_date: Optional[datetime] = None  # Timestamp for when card was requested for shipping
+
+class WithdrawRequestDetail(BaseModel):
+    """Model for the details of a specific withdraw request"""
+    id: str = Field(..., description="The ID of the withdraw request")
+    created_at: datetime = Field(..., description="The timestamp when the withdraw request was created")
+    request_date: datetime = Field(..., description="The timestamp when the withdraw request was made")
+    status: str = Field(..., description="The status of the withdraw request (e.g., 'pending', 'label_created', 'shipped', 'delivered')")
+    user_id: str = Field(..., description="The ID of the user who made the withdraw request")
+    card_count: Optional[int] = Field(None, description="The number of cards in this withdraw request")
+    shipping_address: Optional[Dict[str, Any]] = Field(None, description="The shipping address for this withdraw request")
+    shippo_address_id: Optional[str] = Field(None, description="The Shippo address ID")
+    shippo_parcel_id: Optional[str] = Field(None, description="The Shippo parcel ID")
+    shippo_shipment_id: Optional[str] = Field(None, description="The Shippo shipment ID")
+    shippo_transaction_id: Optional[str] = Field(None, description="The Shippo transaction ID for label purchase")
+    shippo_label_url: Optional[str] = Field(None, description="The URL for the shipping label PDF")
+    tracking_number: Optional[str] = Field(None, description="The tracking number for the shipment")
+    tracking_url: Optional[str] = Field(None, description="The URL for tracking the shipment")
+    shipping_status: Optional[str] = Field(None, description="The status of the shipment (e.g., 'label_created', 'shipped', 'delivered')")
+
+class UpdateWithdrawRequestStatusRequest(BaseModel):
+    """Request model for updating withdraw request status"""
+    status: str = Field(..., description="The new status for the withdraw request (e.g., 'pending', 'label_created', 'shipped', 'delivered')")
+    shipping_status: str = Field(..., description="The new shipping status for the withdraw request (e.g., 'label_created', 'shipped', 'delivered')")
+
+class AllWithdrawRequestsResponse(BaseModel):
+    """Response model for listing all withdraw requests with cursor pagination"""
+    withdraw_requests: List[WithdrawRequest]
+    pagination: CursorPaginationInfo

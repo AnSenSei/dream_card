@@ -73,6 +73,64 @@ The Chouka Cards Team
         logger.error(f"Error sending offer accepted email: {e}", exc_info=True)
         return None
 
+async def send_item_sold_email(to_email: str, to_name: str, listing_data: dict, offer_type: str, offer_amount: float or int, buyer_name: str):
+    """
+    Send an email notification to a seller when their item has been sold.
+
+    Args:
+        to_email: The email address of the seller
+        to_name: The name of the seller
+        listing_data: Dictionary containing listing information
+        offer_type: Type of offer ("cash" or "point")
+        offer_amount: Amount of the offer
+        buyer_name: Name of the buyer
+
+    Returns:
+        The response from the Mailgun API
+
+    Raises:
+        HTTPException: If there's an error sending the email
+    """
+    try:
+        # Format the offer amount based on type
+        formatted_amount = f"${offer_amount:.2f}" if offer_type.lower() == "cash" else f"{offer_amount} points"
+
+        # Construct the email subject and body
+        subject = f"Your item {listing_data.get('card_name', 'a card')} has been sold!"
+        text = f"""Hello {to_name},
+
+Great news! Your item {listing_data.get('card_name', 'a card')} has been sold for {formatted_amount} to {buyer_name}.
+
+The transaction has been completed successfully.
+
+Thank you for using our marketplace!
+
+The Chouka Cards Team
+"""
+
+        # Send the email using Mailgun API
+        response = requests.post(
+            "https://api.mailgun.net/v3/sandbox8cfcd36a145642ff953f9280ab213285.mailgun.org/messages",
+            auth=("api", settings.mailgun_api),
+            data={
+                "from": "Chouka Cards <postmaster@mg.zapull.fun>",
+                "to": f"{to_name} <{to_email}>",
+                "subject": subject,
+                "text": text
+            }
+        )
+
+        if response.status_code != 200:
+            logger.error(f"Failed to send email: {response.text}")
+            return None
+
+        logger.info(f"Successfully sent item sold email to {to_email}")
+        return response
+
+    except Exception as e:
+        logger.error(f"Error sending item sold email: {e}", exc_info=True)
+        return None
+
 async def withdraw_listing(
     user_id: str,
     listing_id: str,
@@ -140,6 +198,14 @@ async def withdraw_listing(
         # Check if the card still exists
         card_doc = await card_ref.get()
 
+        # Get all point offers for this listing
+        point_offers_ref = listing_ref.collection('point_offers')
+        point_offers = await point_offers_ref.get()
+
+        # Get all cash offers for this listing
+        cash_offers_ref = listing_ref.collection('cash_offers')
+        cash_offers = await cash_offers_ref.get()
+
         # Define the transaction function
         @firestore.async_transactional
         async def _txn(tx: firestore.AsyncTransaction):
@@ -157,6 +223,14 @@ async def withdraw_listing(
                     'quantity': current_quantity + listing_quantity,
                     'locked_quantity': new_locked_quantity
                 })
+
+            # Delete all point offers for this listing
+            for offer in point_offers:
+                tx.delete(point_offers_ref.document(offer.id))
+
+            # Delete all cash offers for this listing
+            for offer in cash_offers:
+                tx.delete(cash_offers_ref.document(offer.id))
 
             # Delete the listing
             tx.delete(listing_ref)
@@ -798,7 +872,7 @@ async def offer_points(
 
         # Get the user's my_point_offers subcollection reference
         my_point_offers_ref = user_ref.collection('my_point_offers')
-        new_my_offer_ref = my_point_offers_ref.document()  # Auto-generate ID
+        new_my_offer_ref = my_point_offers_ref.document(new_offer_ref.id)  # Use the same ID as the listing's offer
 
         # Create my_offer_data with additional listing information
         my_offer_data = {
@@ -1441,7 +1515,7 @@ async def offer_cash(
 
         # Get the user's my_cash_offers subcollection reference
         my_cash_offers_ref = user_ref.collection('my_cash_offers')
-        new_my_offer_ref = my_cash_offers_ref.document()  # Auto-generate ID
+        new_my_offer_ref = my_cash_offers_ref.document(new_offer_ref.id)  # Use the same ID as the listing's offer
 
         # Create my_offer_data with additional listing information
         my_offer_data = {
@@ -1675,6 +1749,7 @@ async def get_all_listings(
         )
 
         return PaginatedListingsResponse(
+            id = hit_data["object_id"],
             listings=listings,
             pagination=pagination_info,
             filters=filters_info,
@@ -1927,6 +2002,14 @@ async def pay_point_offer(
         if not my_offer_ref:
             logger.warning(f"Could not find corresponding my_offer for offer {offer_id} in user {user_id}'s my_point_offers collection")
 
+        # Get all point offers for this listing
+        point_offers_ref = listing_ref.collection('point_offers')
+        point_offers = await point_offers_ref.get()
+
+        # Get all cash offers for this listing
+        cash_offers_ref = listing_ref.collection('cash_offers')
+        cash_offers = await cash_offers_ref.get()
+
         # 10. Create a transaction ID
         transaction_id = f"tx_{listing_id}_{offer_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
@@ -1944,11 +2027,29 @@ async def pay_point_offer(
                 "pointsBalance": firestore.Increment(points_to_pay)
             })
 
+            # e. Delete the user's offer from their my_point_offers collection
+            if my_offer_ref:
+                tx.delete(my_offer_ref)
+
+            # Delete the offer from the listing's point_offers collection
+            tx.delete(offer_ref)
+
             # b. Update the listing quantity
             current_quantity = listing_data.get("quantity", 0)
             new_quantity = current_quantity - quantity_to_deduct
 
             if new_quantity <= 0:
+                # Delete all point offers for this listing
+                for offer in point_offers:
+                    # We've already deleted the current offer above, so we can skip it here
+                    if offer.id == offer_id:
+                        continue
+                    tx.delete(point_offers_ref.document(offer.id))
+
+                # Delete all cash offers for this listing
+                for offer in cash_offers:
+                    tx.delete(cash_offers_ref.document(offer.id))
+
                 # Delete the listing if quantity becomes zero
                 tx.delete(listing_ref)
             else:
@@ -2008,16 +2109,6 @@ async def pay_point_offer(
             }
             tx.set(transaction_ref, transaction_data)
 
-            # d. Update the offer status
-            tx.update(offer_ref, {
-                "status": "paid",
-                "paid_at": datetime.now()
-            })
-
-            # e. Delete the user's offer from their my_point_offers collection
-            if my_offer_ref:
-                tx.delete(my_offer_ref)
-
         # Execute the transaction
         transaction = db_client.transaction()
         await _txn(transaction)
@@ -2071,6 +2162,31 @@ async def pay_point_offer(
         except Exception as e:
             logger.error(f"Error adding card to user {user_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Transaction completed but failed to add card to user: {str(e)}")
+
+        # 14. Send email notification to the seller
+        try:
+            # Get the seller's user details
+            seller = await get_user_by_id(seller_id, db_client)
+
+            # Get the buyer's user details
+            buyer = await get_user_by_id(user_id, db_client)
+
+            if seller and seller.email:
+                # Send the email notification
+                await send_item_sold_email(
+                    to_email=seller.email,
+                    to_name=seller.displayName,
+                    listing_data=listing_data,
+                    offer_type="point",
+                    offer_amount=points_to_pay,
+                    buyer_name=buyer.displayName if buyer else "a user"
+                )
+                logger.info(f"Sent item sold email to {seller.email}")
+            else:
+                logger.warning(f"Could not send email notification: Seller {seller_id} not found or has no email")
+        except Exception as e:
+            # Log the error but don't fail the whole operation if email sending fails
+            logger.error(f"Error sending item sold email: {e}", exc_info=True)
 
         logger.info(f"Successfully paid for point offer {offer_id} for listing {listing_id} by user {user_id}")
         return {

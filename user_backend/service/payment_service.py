@@ -9,6 +9,8 @@ from datetime import datetime
 from config import get_logger, settings, execute_query
 from service.card_service import add_card_to_user
 from service.account_service import add_points_to_user,add_points_and_update_cash_recharged
+from service.user_service import get_user_by_id
+from service.marketplace_service import send_item_sold_email
 from config.db_connection import test_connection, db_connection
 
 
@@ -703,14 +705,55 @@ async def handle_marketplace_payment(
         # 5. Create a transaction ID
         transaction_id = f"tx_{listing_id}_{offer_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
+        # Get all point offers for this listing
+        point_offers_ref = listing_ref.collection('point_offers')
+        point_offers = await point_offers_ref.get()
+
+        # Get all cash offers for this listing
+        cash_offers_ref = listing_ref.collection('cash_offers')
+        cash_offers = await cash_offers_ref.get()
+
         # 6. Execute the transaction
         @firestore.async_transactional
         async def _txn(tx: firestore.AsyncTransaction):
+            # Delete the offer from the listing's cash_offers collection
+            if offer_id:
+                offer_ref = listing_ref.collection('cash_offers').document(offer_id)
+                tx.delete(offer_ref)
+
+                # e. Delete the user's offer from their my_cash_offers collection if it exists
+                try:
+                    buyer_ref = db_client.collection('users').document(buyer_id)
+                    my_cash_offers_ref = buyer_ref.collection('my_cash_offers')
+                    my_cash_offers_query = my_cash_offers_ref.where("listingId", "==", listing_id)
+                    my_cash_offers_docs = await my_cash_offers_query.get()
+
+                    for doc in my_cash_offers_docs:
+                        my_offer_data = doc.to_dict()
+                        # Check if this is the same offer by comparing offerreference
+                        if my_offer_data.get("offerreference") == offer_id:
+                            tx.delete(doc.reference)
+                            break
+                except Exception as e:
+                    logger.error(f"Error deleting user's offer: {e}", exc_info=True)
+                    # Continue with the transaction even if deleting the user's offer fails
+
             # a. Update the listing quantity
             current_quantity = listing_data.get("quantity", 0)
             new_quantity = current_quantity - quantity_to_deduct
 
             if new_quantity <= 0:
+                # Delete all point offers for this listing
+                for offer in point_offers:
+                    tx.delete(point_offers_ref.document(offer.id))
+
+                # Delete all cash offers for this listing
+                for offer in cash_offers:
+                    # We've already deleted the current offer above, so we can skip it here
+                    if offer_id and offer.id == offer_id:
+                        continue
+                    tx.delete(cash_offers_ref.document(offer.id))
+
                 # Delete the listing if quantity becomes zero
                 tx.delete(listing_ref)
             else:
@@ -772,31 +815,6 @@ async def handle_marketplace_payment(
             }
             tx.set(transaction_ref, transaction_data)
 
-            # d. Update the offer status if offer_id is provided
-            if offer_id:
-                offer_ref = listing_ref.collection('cash_offers').document(offer_id)
-                tx.update(offer_ref, {
-                    "status": "paid",
-                    "paid_at": datetime.now()
-                })
-
-                # e. Delete the user's offer from their my_cash_offers collection if it exists
-                try:
-                    buyer_ref = db_client.collection('users').document(buyer_id)
-                    my_cash_offers_ref = buyer_ref.collection('my_cash_offers')
-                    my_cash_offers_query = my_cash_offers_ref.where("listingId", "==", listing_id)
-                    my_cash_offers_docs = await my_cash_offers_query.get()
-
-                    for doc in my_cash_offers_docs:
-                        my_offer_data = doc.to_dict()
-                        # Check if this is the same offer by comparing offerreference
-                        if my_offer_data.get("offerreference") == offer_id:
-                            tx.delete(doc.reference)
-                            break
-                except Exception as e:
-                    logger.error(f"Error deleting user's offer: {e}", exc_info=True)
-                    # Continue with the transaction even if deleting the user's offer fails
-
         # Execute the transaction
         transaction = db_client.transaction()
         await _txn(transaction)
@@ -850,6 +868,31 @@ async def handle_marketplace_payment(
         except Exception as e:
             logger.error(f"Error adding card to user {buyer_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Transaction completed but failed to add card to user: {str(e)}")
+
+        # 9. Send email notification to the seller
+        try:
+            # Get the seller's user details
+            seller = await get_user_by_id(seller_id, db_client)
+
+            # Get the buyer's user details
+            buyer = await get_user_by_id(buyer_id, db_client)
+
+            if seller and seller.email:
+                # Send the email notification
+                await send_item_sold_email(
+                    to_email=seller.email,
+                    to_name=seller.displayName,
+                    listing_data=listing_data,
+                    offer_type="cash",
+                    offer_amount=amount_dollars,
+                    buyer_name=buyer.displayName if buyer else "a user"
+                )
+                logger.info(f"Sent item sold email to {seller.email}")
+            else:
+                logger.warning(f"Could not send email notification: Seller {seller_id} not found or has no email")
+        except Exception as e:
+            # Log the error but don't fail the whole operation if email sending fails
+            logger.error(f"Error sending item sold email: {e}", exc_info=True)
 
         logger.info(f"Successfully processed marketplace payment for listing {listing_id}, buyer {buyer_id}, offer {offer_id}")
         return {

@@ -9,6 +9,7 @@ from models.schemas import CardListing, PaginationInfo, AppliedFilters
 
 class PaginatedListingsResponse(BaseModel):
     """Response model for paginated listings"""
+    id: str
     listings: List[CardListing]
     pagination: PaginationInfo
     filters: AppliedFilters
