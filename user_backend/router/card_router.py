@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 from google.cloud import firestore
 from pydantic import BaseModel
 
-from models.schemas import (UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest,
+from models.schemas import (UserCard, UserCardsResponse, UserCardListResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest,
                             PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse,
                             WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse, WithdrawRequestsResponse, UpdateWithdrawCardsRequest)
 from service.card_service import (
@@ -27,6 +27,7 @@ from service.card_service import (
     get_user_pack_opening_history,
     add_to_top_hits,
     update_withdraw_request,
+    get_user_highlights,
 )
 from config import get_firestore_client, get_logger
 
@@ -428,6 +429,43 @@ async def delete_card_from_highlights_route(
     except Exception as e:
         logger.error(f"Error deleting card from highlights for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while deleting the card from highlights")
+
+@router.get("/{user_id}/highlights", response_model=UserCardListResponse)
+async def get_user_highlights_route(
+    user_id: str = Path(..., description="The ID of the user to get highlights for"),
+    page: int = Query(1, description="Page number (default: 1)"),
+    per_page: int = Query(10, description="Items per page (default: 10)"),
+    sort_by: str = Query("date_got", description="Field to sort by (default: date_got)"),
+    sort_order: str = Query("desc", description="Sort order (asc or desc, default: desc)"),
+    search_query: Optional[str] = Query(None, description="Optional search query to filter cards by name"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Get all cards in the user's highlights collection with pagination.
+
+    This endpoint:
+    1. Takes a user ID as a path parameter
+    2. Supports pagination with page and per_page query parameters
+    3. Supports sorting with sort_by and sort_order query parameters
+    4. Supports searching with search_query query parameter
+    5. Returns a list of highlighted cards with pagination info
+    """
+    try:
+        highlights_response = await get_user_highlights(
+            user_id=user_id,
+            db_client=db,
+            page=page,
+            per_page=per_page,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            search_query=search_query
+        )
+        return highlights_response
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting highlights for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while retrieving the highlights")
 
 class TopHitsRequest(BaseModel):
     """Request model for adding a card to top hits"""

@@ -2387,6 +2387,153 @@ async def delete_card_from_highlights(
         logger.error(f"Error deleting card {card_id} from highlights for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete card from highlights: {str(e)}")
 
+async def get_user_highlights(
+    user_id: str,
+    db_client: AsyncClient,
+    page: int = 1,
+    per_page: int = 10,
+    sort_by: str = "date_got",
+    sort_order: str = "desc",
+    search_query: str | None = None
+) -> UserCardListResponse:
+    """
+    Get all cards in the user's highlights collection with pagination.
+
+    Args:
+        user_id: The ID of the user to get highlights for
+        db_client: Firestore client
+        page: The page number to get (default: 1)
+        per_page: The number of items per page (default: 10)
+        sort_by: The field to sort by (default: "date_got")
+        sort_order: The sort order ("asc" or "desc", default: "desc")
+        search_query: Optional search query to filter cards by name
+
+    Returns:
+        A UserCardListResponse with the highlighted cards, pagination info, and applied filters
+
+    Raises:
+        HTTPException: If there's an error getting the highlights
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the highlights collection reference
+        highlights_ref = user_ref.collection('highlights')
+
+        # Create the base query
+        query = highlights_ref
+
+        # Apply search query if provided
+        if search_query and search_query.strip():
+            stripped_search_query = search_query.strip()
+            logger.info(f"Applying search filter for card_name: >='{stripped_search_query}' and <='{stripped_search_query}\uf8ff'")
+            query = query.where("card_name", ">=", stripped_search_query)
+            query = query.where("card_name", "<=", stripped_search_query + "\uf8ff")
+
+        # Count total items matching the query
+        count_agg_query = query.count()
+        count_snapshot = await count_agg_query.get()
+        total_items = count_snapshot[0][0].value if count_snapshot and count_snapshot[0] else 0
+
+        if total_items == 0:
+            logger.info(f"No highlights found for user {user_id}")
+            return UserCardListResponse(
+                subcollection_name="highlights",
+                cards=[],
+                pagination=PaginationInfo(
+                    total_items=0,
+                    items_per_page=per_page,
+                    current_page=page,
+                    total_pages=0
+                ),
+                filters=AppliedFilters(sort_by=sort_by, sort_order=sort_order, search_query=search_query)
+            )
+
+        # Determine sort direction
+        if sort_order.lower() == "desc":
+            direction = firestore.Query.DESCENDING
+        elif sort_order.lower() == "asc":
+            direction = firestore.Query.ASCENDING
+        else:
+            logger.warning(f"Invalid sort_order '{sort_order}'. Defaulting to DESCENDING.")
+            direction = firestore.Query.DESCENDING
+            sort_order = "desc"  # Ensure applied filter reflects actual sort
+
+        # Apply sorting
+        query_with_filters = query  # query already has search filters if any
+
+        if search_query and search_query.strip() and sort_by != "card_name":
+            # If searching and sorting by a different field, ensure card_name is the first sort key
+            logger.warning(f"Search query on 'card_name' is active while sorting by '{sort_by}'. Firestore requires ordering by 'card_name' first.")
+            query_with_sort = query_with_filters.order_by("card_name").order_by(sort_by, direction=direction)
+        else:
+            query_with_sort = query_with_filters.order_by(sort_by, direction=direction)
+
+        # Apply pagination
+        current_page_query = max(1, page)
+        per_page_query = max(1, per_page)
+        offset = (current_page_query - 1) * per_page_query
+
+        paginated_query = query_with_sort.limit(per_page_query).offset(offset)
+
+        # Execute the query
+        logger.info(f"Executing Firestore query for user {user_id} highlights with pagination and sorting")
+        stream = paginated_query.stream()
+
+        # Process the results
+        cards_list = []
+        async for doc in stream:
+            try:
+                card_data = doc.to_dict()
+                if not card_data:  # Skip empty documents
+                    logger.warning(f"Skipping empty document with ID: {doc.id} in highlights")
+                    continue
+
+                # Ensure ID is part of the data
+                if 'id' not in card_data:
+                    card_data['id'] = doc.id
+
+                # Generate signed URL for the card image
+                if 'image_url' in card_data and card_data['image_url']:
+                    try:
+                        card_data['image_url'] = await generate_signed_url(card_data['image_url'])
+                    except Exception as sign_error:
+                        logger.error(f"Failed to generate signed URL for {card_data['image_url']}: {sign_error}")
+                        # Keep the original URL if signing fails
+
+                # Create a UserCard object and add it to the list
+                cards_list.append(UserCard(**card_data))
+            except Exception as card_error:
+                logger.error(f"Error processing card document {doc.id}: {card_error}", exc_info=True)
+                # Skip this card and continue with others
+
+        # Calculate total pages
+        total_pages = math.ceil(total_items / per_page_query) if total_items > 0 else 0
+
+        # Create and return the response
+        return UserCardListResponse(
+            subcollection_name="highlights",
+            cards=cards_list,
+            pagination=PaginationInfo(
+                total_items=total_items,
+                items_per_page=per_page_query,
+                current_page=current_page_query,
+                total_pages=total_pages
+            ),
+            filters=AppliedFilters(sort_by=sort_by, sort_order=sort_order, search_query=search_query)
+        )
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting highlights for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get highlights: {str(e)}")
+
 async def withdraw_ship_card(user_id: str, card_id: str, subcollection_name: str, db_client: AsyncClient, quantity: int = 1) -> UserCard:
     """
     Withdraw a card from a user's collection by creating a withdraw request.
