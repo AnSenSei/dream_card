@@ -1,6 +1,23 @@
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 
+class CardFusionInfo(BaseModel):
+    """
+    Represents information about a fusion recipe that uses a specific card as an ingredient.
+    This model is used for the response when querying what fusions a card is used in.
+    """
+    fusion_id: str
+    result_card_id: str
+    pack_reference: str
+
+class CardFusionsResponse(BaseModel):
+    """
+    Response model for the endpoint that returns information about what fusions a card is used in.
+    """
+    card_id: str
+    collection_id: str
+    fusions: List[CardFusionInfo]
+
 class PaginationInfo(BaseModel):
     """Pagination information for list responses"""
     total_items: int

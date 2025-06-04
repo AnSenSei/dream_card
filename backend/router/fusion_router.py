@@ -10,7 +10,8 @@ from models.fusion_schema import (
     AppliedFilters,
     FusionRecipePack,
     FusionRecipeCollection,
-    PaginatedFusionRecipesResponse
+    PaginatedFusionRecipesResponse,
+    CardFusionsResponse
 )
 from pydantic import BaseModel
 from service.fusion_service import (
@@ -18,7 +19,8 @@ from service.fusion_service import (
     get_fusion_recipe_by_id,
     get_all_fusion_recipes,
     update_fusion_recipe,
-    delete_fusion_recipe
+    delete_fusion_recipe,
+    get_card_fusions
 )
 from config import get_firestore_client, get_logger
 from google.cloud import firestore
@@ -240,3 +242,28 @@ async def delete_fusion_recipe_route(
     except Exception as e:
         logger.error(f"Unhandled error in delete_fusion_recipe_route: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while deleting the fusion recipe.")
+
+@router.get("/card/{collection_id}/{card_id}", response_model=CardFusionsResponse)
+async def get_card_fusions_route(
+    collection_id: str,
+    card_id: str,
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Retrieves information about what fusions a card is used in.
+
+    Args:
+        collection_id: The ID of the collection the card belongs to
+        card_id: The ID of the card
+        db: Firestore client dependency
+
+    Returns:
+        CardFusionsResponse: Information about the fusions the card is used in
+    """
+    try:
+        return await get_card_fusions(collection_id, card_id, db)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Unhandled error in get_card_fusions_route: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An internal error occurred while retrieving fusion information for card '{card_id}' in collection '{collection_id}'.")

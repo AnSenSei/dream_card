@@ -4,7 +4,7 @@ import httpx
 from typing import Dict, Any, Optional
 
 from service.storage_service import add_to_official_listing, withdraw_from_official_listing, get_all_official_listings
-from service.marketplace_service import buy_card_from_official_listing
+from service.marketplace_service import buy_card_from_official_listing, get_official_listings_with_filters
 from config import get_logger, get_firestore_client, settings
 
 logger = get_logger(__name__)
@@ -155,19 +155,41 @@ async def add_to_official_listing_endpoint(
 
 @router.get("/official_listings")
 async def get_official_listings_endpoint(
-    collection_id: str = Query(..., description="Collection ID to get official listings for")
+    collection_id: str = Query(..., description="Collection ID to get official listings for"),
+    page: int = Query(1, description="Page number to retrieve", ge=1),
+    per_page: int = Query(10, description="Number of items per page", ge=1, le=100),
+    sort_by: str = Query("pricePoints", description="Field to sort by"),
+    sort_order: str = Query("asc", description="Sort order (asc or desc)"),
+    search_query: Optional[str] = Query(None, description="Search query to filter cards by name")
 ):
     """
-    Retrieves all cards from the official_listing collection for a specific collection.
+    Retrieves cards from the official_listing collection for a specific collection,
+    with support for search, sort, and pagination.
 
     Parameters:
     - collection_id: The ID of the collection to get official listings for
+    - page: The page number to retrieve (default: 1)
+    - per_page: The number of items per page (default: 10, max: 100)
+    - sort_by: The field to sort by (default: "pricePoints")
+    - sort_order: The sort order, either "asc" or "desc" (default: "asc")
+    - search_query: Optional search query to filter cards by name
     """
     try:
-        result = await get_all_official_listings(collection_id)
+        result = await get_official_listings_with_filters(
+            collection_id=collection_id,
+            page=page,
+            per_page=per_page,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            search_query=search_query
+        )
+
+        # Extract the total number of items for the message
+        total_items = result.pagination.total_items
+
         return {
             "status": "success",
-            "message": f"Retrieved {len(result)} cards from official listing for collection {collection_id}",
+            "message": f"Retrieved {len(result.cards)} cards from official listing for collection {collection_id} (total: {total_items})",
             "data": result
         }
     except HTTPException as e:

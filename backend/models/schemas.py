@@ -55,6 +55,7 @@ class StoredCardInfo(BaseModel):
     image_url: str
     quantity: int = 0  # D
     condition: str = "mint"  # Default condition is "mint"
+    used_in_fusion: Optional[List[Dict[str, Any]]] = None
 
 class UpdateQuantityRequest(BaseModel):
     quantity_change: int 

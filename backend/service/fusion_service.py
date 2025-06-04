@@ -8,7 +8,8 @@ from models.fusion_schema import (
     FusionRecipe, FusionIngredient, FusionIngredientRequest, 
     CreateFusionRecipeRequest, UpdateFusionRecipeRequest,
     PaginationInfo, AppliedFilters, FusionRecipePack, 
-    FusionRecipeCollection, PaginatedFusionRecipesResponse
+    FusionRecipeCollection, PaginatedFusionRecipesResponse,
+    CardFusionInfo, CardFusionsResponse
 )
 from service.storage_service import update_card_information
 
@@ -823,6 +824,67 @@ async def update_fusion_recipe(
     except Exception as e:
         logger.error(f"Error updating fusion recipe '{result_card_id}' in Firestore: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Could not update fusion recipe '{result_card_id}' in database.")
+
+async def get_card_fusions(
+    collection_id: str,
+    card_id: str,
+    db_client: AsyncClient
+) -> CardFusionsResponse:
+    """
+    Retrieves information about what fusions a card is used in.
+
+    Args:
+        collection_id: The ID of the collection the card belongs to
+        card_id: The ID of the card
+        db_client: Firestore client
+
+    Returns:
+        CardFusionsResponse: Information about the fusions the card is used in
+
+    Raises:
+        HTTPException: If card not found or on database error
+    """
+    if not db_client:
+        logger.error("Firestore client not provided to get_card_fusions.")
+        raise HTTPException(status_code=500, detail="Firestore service not configured (client missing).")
+
+    try:
+        # Get the card data using the storage service
+        from service.storage_service import get_card_by_id
+        card = await get_card_by_id(card_id, collection_id)
+
+        # Extract the used_in_fusion array from the card data
+        card_data = card.model_dump()
+        logger.info(f"Card data for '{card_id}' in collection '{collection_id}': {card_data}")
+
+        fusions = []
+
+        if 'used_in_fusion' in card_data and card_data['used_in_fusion']:
+            logger.info(f"Found used_in_fusion array with {len(card_data['used_in_fusion'])} entries")
+            # Convert each fusion info to a CardFusionInfo object
+            for fusion in card_data['used_in_fusion']:
+                logger.info(f"Processing fusion: {fusion}")
+                fusion_info = CardFusionInfo(
+                    fusion_id=fusion.get('fusion_id', ''),
+                    result_card_id=fusion.get('result_card_id', ''),
+                    pack_reference=fusion.get('pack_reference', '')
+                )
+                fusions.append(fusion_info)
+        else:
+            logger.warning(f"No used_in_fusion array found in card data for '{card_id}' in collection '{collection_id}'")
+
+        # Create and return the response
+        return CardFusionsResponse(
+            card_id=card_id,
+            collection_id=collection_id,
+            fusions=fusions
+        )
+    except HTTPException as e:
+        # Re-raise HTTPExceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving fusion information for card '{card_id}' in collection '{collection_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not retrieve fusion information for card '{card_id}' in collection '{collection_id}': {str(e)}")
 
 async def delete_fusion_recipe(
     pack_id: str,

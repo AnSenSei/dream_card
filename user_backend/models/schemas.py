@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from uuid import UUID
 
@@ -434,6 +434,93 @@ class LevelRankEntry(BaseModel):
 
     def __str__(self) -> str:
         return f"{self.user_id}:{self.total_drawn}"
+
+class AchievementCondition(BaseModel):
+    """
+    Represents the condition for an achievement.
+    """
+    target: int
+    type: str
+
+class AchievementRewardPoint(BaseModel):
+    """
+    Represents a point reward for an achievement.
+    """
+    amount: int
+    type: str = "point"
+
+class AchievementRewardEmblem(BaseModel):
+    """
+    Represents an emblem reward for an achievement.
+    """
+    emblemId: str
+    type: str = "emblem"
+    url: str
+
+class Achievement(BaseModel):
+    """
+    Represents an achievement in the system.
+    """
+    id: str
+    name: str
+    description: str
+    image_url: Optional[str] = None
+    criteria: Optional[Dict[str, Any]] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    emblemId: Optional[str] = None
+    emblemUrl: Optional[str] = None
+    condition: Optional[AchievementCondition] = None
+    reward: Optional[List[Union[AchievementRewardPoint, AchievementRewardEmblem]]] = None
+
+class UserAchievement(BaseModel):
+    """
+    Represents a user's progress or completion of an achievement.
+    """
+    achievement_id: str
+    user_id: str
+    acquired: bool = False
+    progress: Optional[float] = None  # Progress as a percentage (0-100)
+    acquired_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+class AchievementWithProgress(Achievement):
+    """
+    Represents an achievement with user progress information.
+    Only includes the fields required by the API response format.
+    """
+    awardedAt: Optional[datetime] = None
+    progress: Optional[float] = None
+    achieved: bool = False
+
+class UserAchievementsResponse(BaseModel):
+    """
+    Response model for listing user achievements with pagination.
+    """
+    achievements: List[AchievementWithProgress]
+    pagination: PaginationInfo
+
+class AchievementResponse(BaseModel):
+    """
+    Simplified achievement response model that excludes certain fields.
+    """
+    id: str
+    name: str
+    description: str
+    emblemId: Optional[str] = None
+    emblemUrl: Optional[str] = None
+    condition: Optional[AchievementCondition] = None
+    reward: Optional[List[Union[AchievementRewardPoint, AchievementRewardEmblem]]] = None
+    created_at: datetime
+    progress: Optional[float] = None
+    achieved: bool = False
+
+class AllAchievementsResponse(BaseModel):
+    """
+    Response model for listing all achievements with user progress and pagination.
+    """
+    achievements: List[AchievementResponse]
+    pagination: PaginationInfo
 
 # Note: For file uploads, we don't use a Pydantic model
 # The avatar upload endpoint will use FastAPI's File and UploadFile directly
