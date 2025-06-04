@@ -1,6 +1,19 @@
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 
+class PaginationInfo(BaseModel):
+    """Pagination information for list responses"""
+    total_items: int
+    total_pages: int
+    current_page: int
+    per_page: int
+
+class AppliedFilters(BaseModel):
+    """Filters applied to a fusion recipe list query"""
+    sort_by: Optional[str] = None
+    sort_order: str = "desc"
+    search_query: Optional[str] = None
+
 class FusionIngredientRequest(BaseModel):
     """
     Represents an ingredient card required for a fusion recipe in request models.
@@ -31,6 +44,8 @@ class FusionRecipe(BaseModel):
     pack_id: str
     pack_collection_id: str
     ingredients: List[FusionIngredient]
+    cards_needed: Optional[int] = None
+    total_cards_needed: Optional[int] = None
 
 class CreateFusionRecipeRequest(BaseModel):
     """
@@ -51,3 +66,26 @@ class UpdateFusionRecipeRequest(BaseModel):
     pack_collection_id: Optional[str] = None
     added_ingredients: Optional[List[FusionIngredientRequest]] = None
     deleted_ingredients: Optional[List[FusionIngredientRequest]] = None
+
+class FusionRecipePack(BaseModel):
+    """
+    Represents a pack containing fusion recipes.
+    """
+    pack_id: str
+    pack_collection_id: str
+    cards: List[FusionRecipe]
+    cards_count: int
+
+class FusionRecipeCollection(BaseModel):
+    """
+    Represents a collection containing fusion recipe packs.
+    """
+    collection_id: str
+    packs: List[FusionRecipePack]
+    packs_count: int
+
+class PaginatedFusionRecipesResponse(BaseModel):
+    """Response model for paginated fusion recipes"""
+    collections: List[FusionRecipeCollection]
+    pagination: PaginationInfo
+    filters: AppliedFilters

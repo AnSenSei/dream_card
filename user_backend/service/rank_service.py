@@ -8,7 +8,8 @@ from google.cloud.firestore_v1 import AsyncClient
 
 from config import get_logger, settings
 from config.db_connection import db_connection
-from models.schemas import RankEntry
+from models.schemas import RankEntry, LevelRankEntry
+from utils.gcs_utils import generate_signed_url
 
 logger = get_logger(__name__)
 
@@ -54,6 +55,61 @@ async def get_weekly_spending_rank(db_client: AsyncClient, week_id: Optional[str
     except Exception as e:
         logger.error(f"Error getting weekly spending rank for week {week_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get weekly spending rank: {str(e)}")
+
+async def get_top_level_users(db_client: AsyncClient, limit: int = 100) -> List[LevelRankEntry]:
+    """
+    Get the top users by level, sorted by total_drawn.
+
+    Args:
+        db_client: Firestore async client
+        limit: The maximum number of users to return (default: 100)
+
+    Returns:
+        List[LevelRankEntry]: A list of LevelRankEntry objects containing user_id, total_drawn, level, display_name, and avatar (with signed URL)
+
+    Raises:
+        HTTPException: If there's an error getting the top level users
+    """
+    try:
+        # Reference to the users collection
+        users_ref = db_client.collection(settings.firestore_collection_users)
+
+        # Query the collection, order by 'total_drawn' in descending order, and limit to the specified number
+        query = users_ref.order_by('total_drawn', direction=firestore.Query.DESCENDING).limit(limit)
+
+        # Execute the query
+        docs = await query.get()
+
+        # Convert the documents to LevelRankEntry objects
+        result = []
+        for doc in docs:
+            data = doc.to_dict()
+            total_drawn = data.get('total_drawn', 0)
+            level = data.get('level', 1)
+            display_name = data.get('displayName', None)
+            avatar = data.get('avatar', None)
+
+            # Generate signed URL for avatar if it exists
+            if avatar:
+                try:
+                    avatar = await generate_signed_url(avatar)
+                    logger.info(f"Generated signed URL for avatar of user {doc.id}")
+                except Exception as e:
+                    logger.error(f"Failed to generate signed URL for avatar of user {doc.id}: {e}")
+                    # Keep the original avatar URL if signing fails
+
+            result.append(LevelRankEntry(
+                user_id=doc.id, 
+                total_drawn=total_drawn, 
+                level=level,
+                display_name=display_name,
+                avatar=avatar
+            ))
+
+        return result
+    except Exception as e:
+        logger.error(f"Error getting top level users: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get top level users: {str(e)}")
 
 async def get_user_pack_opening_history(user_id: str, page: int = 1, per_page: int = 10) -> Dict[str, Any]:
     """

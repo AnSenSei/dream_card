@@ -716,6 +716,17 @@ async def handle_marketplace_payment(
         # 6. Execute the transaction
         @firestore.async_transactional
         async def _txn(tx: firestore.AsyncTransaction):
+            # Update buyer and seller deal counts
+            buyer_ref = db_client.collection('users').document(buyer_id)
+            tx.update(buyer_ref, {
+                "buy_deal": firestore.Increment(1)
+            })
+
+            seller_ref = db_client.document(seller_ref_path)
+            tx.update(seller_ref, {
+                "sell_deal": firestore.Increment(1)
+            })
+
             # Delete the offer from the listing's cash_offers collection
             if offer_id:
                 offer_ref = listing_ref.collection('cash_offers').document(offer_id)

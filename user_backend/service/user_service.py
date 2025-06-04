@@ -1842,7 +1842,9 @@ async def create_account(request: CreateAccountRequest, db_client: AsyncClient, 
 async def perform_fusion(
     user_id: str,
     result_card_id: str,
-    db_client: AsyncClient
+    db_client: AsyncClient,
+    collection_id: Optional[str] = None,
+    pack_id: Optional[str] = None
 ) -> PerformFusionResponse:
     """
     Perform a fusion operation for a user.
@@ -1857,6 +1859,8 @@ async def perform_fusion(
         user_id: The ID of the user performing the fusion
         result_card_id: The ID of the fusion recipe to use
         db_client: Firestore client
+        collection_id: Optional. The ID of the collection containing the fusion recipe
+        pack_id: Optional. The ID of the pack containing the fusion recipe
 
     Returns:
         PerformFusionResponse with success status, message, and the resulting card
@@ -1873,13 +1877,47 @@ async def perform_fusion(
             raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
 
         # Get the fusion recipe
-        recipe_ref = db_client.collection('fusion_recipes').document(result_card_id)
-        recipe_doc = await recipe_ref.get()
+        fusion_recipes_ref = db_client.collection('fusion_recipes')
+        recipe_doc = None
+        recipe_data = None
 
-        if not recipe_doc.exists:
+        # If collection_id and pack_id are provided, directly access the recipe
+        if collection_id and pack_id:
+            card_ref = fusion_recipes_ref.document(collection_id).collection(collection_id).document(pack_id).collection('cards').document(result_card_id)
+            card_doc = await card_ref.get()
+
+            if card_doc.exists:
+                recipe_doc = card_doc
+                recipe_data = card_doc.to_dict()
+        else:
+            # If collection_id and pack_id are not provided, search through all collections and packs
+            collections_stream = fusion_recipes_ref.stream()
+
+            # Iterate through all pack collections
+            async for collection_doc in collections_stream:
+                pack_collection_id = collection_doc.id
+                # Get all packs in this collection
+                packs_ref = fusion_recipes_ref.document(pack_collection_id).collection(pack_collection_id)
+                packs_stream = packs_ref.stream()
+
+                # For each pack, check if it contains the recipe
+                async for pack_doc in packs_stream:
+                    pack_id = pack_doc.id
+
+                    # Check if the cards collection has the result_card_id
+                    card_ref = packs_ref.document(pack_id).collection('cards').document(result_card_id)
+                    card_doc = await card_ref.get()
+
+                    if card_doc.exists:
+                        recipe_doc = card_doc
+                        recipe_data = card_doc.to_dict()
+                        break
+
+                if recipe_doc:
+                    break
+
+        if not recipe_doc or not recipe_data:
             raise HTTPException(status_code=404, detail=f"Fusion recipe with ID '{result_card_id}' not found")
-
-        recipe_data = recipe_doc.to_dict()
 
         # Check if the user has all required ingredients
         ingredients = recipe_data.get('ingredients', [])
@@ -4198,15 +4236,40 @@ async def check_card_missing(
         # Process each fusion recipe
         for recipe_id in fusion_recipe_ids:
             # Get the fusion recipe
-            recipe_ref = db_client.collection('fusion_recipes').document(recipe_id)
-            recipe_doc = await recipe_ref.get()
+            # First, we need to find which pack collection this recipe belongs to
+            fusion_recipes_ref = db_client.collection('fusion_recipes')
+            collections_stream = fusion_recipes_ref.stream()
 
-            if not recipe_doc.exists:
+            recipe_doc = None
+            recipe_data = None
+
+            # Iterate through all pack collections
+            async for collection_doc in collections_stream:
+                pack_collection_id = collection_doc.id
+                # Get all packs in this collection
+                packs_ref = fusion_recipes_ref.document(pack_collection_id).collection(pack_collection_id)
+                packs_stream = packs_ref.stream()
+
+                # For each pack, check if it contains the recipe
+                async for pack_doc in packs_stream:
+                    pack_id = pack_doc.id
+
+                    # Check if the cards collection has the recipe_id
+                    card_ref = packs_ref.document(pack_id).collection('cards').document(recipe_id)
+                    card_doc = await card_ref.get()
+
+                    if card_doc.exists:
+                        recipe_doc = card_doc
+                        recipe_data = card_doc.to_dict()
+                        break
+
+                if recipe_doc:
+                    break
+
+            if not recipe_doc or not recipe_data:
                 # Skip non-existent recipes and continue with the next one
                 logger.warning(f"Fusion recipe with ID '{recipe_id}' not found")
                 continue
-
-            recipe_data = recipe_doc.to_dict()
 
             # Initialize recipe missing cards info
             recipe_missing_cards = FusionRecipeMissingCards(

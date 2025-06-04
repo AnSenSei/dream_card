@@ -20,6 +20,7 @@ from config import get_logger, settings
 from config.db_connection import db_connection
 from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserCardListResponse, UserCardsResponse, Address, CreateAccountRequest, PerformFusionResponse, RandomFusionRequest, CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, CheckCardMissingResponse, MissingCard, FusionRecipeMissingCards, RankEntry, WithdrawRequest, WithdrawRequestDetail, WithdrawRequestsResponse
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs, parse_base64_image
+from service.achievements_service import calculate_and_update_level
 
 logger = get_logger(__name__)
 
@@ -256,16 +257,6 @@ async def draw_card_from_pack(collection_id: str, pack_id: str, db_client: Async
 
         # Get the card data
         card_data = card_snap.to_dict()
-
-        # Log the card information
-        logger.info(f"Card drawn from pack '{pack_id}' in collection '{collection_id}':")
-        logger.info(f"  Card ID: {chosen_card_id}")
-        logger.info(f"  Card Name: {card_data.get('name', '')}")
-        logger.info(f"  Card Reference: {str(card_data.get('globalRef').path) if 'globalRef' in card_data else ''}")
-        logger.info(f"  Image URL: {card_data.get('image_url', '')}")
-        logger.info(f"  Point Worth: {card_data.get('point', 0)}")
-        logger.info(f"  Quantity: {card_data.get('quantity', 0)}")
-        logger.info(f"  Rarity: {card_data.get('rarity', 1)}")
 
         # Generate a signed URL for the card image if it's a GCS URI
         image_url = card_data.get('image_url', '')
@@ -586,16 +577,34 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
 
         # Increment the total_drawn and totalPointsSpent fields in the user's document by the pack price multiplied by the number of cards drawn
         # Also deduct the points from the user's balance
+        # Track cards with rarity > 4 and update corresponding fields
         try:
             # We already calculated these values earlier
             # pack_price = pack_data.get('price', 0)
             # total_price = pack_price * len(drawn_cards)
 
-            await user_ref.update({
+            # Count cards with rarity > 4 for each rarity level
+            high_rarity_counts = {}
+            for card in drawn_cards:
+                rarity = card.get('rarity', 0)
+                if rarity >= 4:
+                    field_name = f"total_drawn_rarity_{rarity}"
+                    high_rarity_counts[field_name] = high_rarity_counts.get(field_name, 0) + 1
+
+            # Prepare update data with high rarity counts
+            update_data = {
                 "total_drawn": Increment(total_price),
                 "totalPointsSpent": Increment(total_price),
                 "pointsBalance": Increment(-total_price)  # Deduct points from balance
-            })
+            }
+
+            # Add high rarity counts to update data
+            for field_name, count in high_rarity_counts.items():
+                update_data[field_name] = Increment(count)
+                logger.info(f"Incrementing {field_name} for user '{user_id}' by {count}")
+
+            await user_ref.update(update_data)
+
             logger.info(
                 f"Incremented total_drawn and totalPointsSpent for user '{user_id}' by pack price ({pack_price}) * number of cards drawn ({len(drawn_cards)}) = {total_price}")
             logger.info(
@@ -644,6 +653,14 @@ async def draw_multiple_cards_from_pack(collection_id: str, pack_id: str, user_i
         # Add provably fair info to each card
         for card in drawn_cards:
             card["provably_fair_info"] = provably_fair_info
+
+        # Calculate and update user's level after drawing cards
+        try:
+            await calculate_and_update_level(user_id, db_client)
+            logger.info(f"Updated level for user '{user_id}' after drawing cards")
+        except Exception as e:
+            logger.error(f"Failed to update level for user '{user_id}': {e}")
+            # Continue even if updating level fails
 
         return drawn_cards
     except HTTPException as e:
@@ -1049,7 +1066,8 @@ async def add_card_to_user(
                 logger.info(f"Added card to expiring_cards collection with ID {user_id}_{card_id}")
 
         logger.info(f"Card stored at users/{user_id}/cards/cards/{subcol}/{card_id}")
-        logger.info(f"Decreased quantity of original card {card_reference} by 1")
+        if not from_marketplace:
+            logger.info(f"Decreased quantity of original card {card_reference} by 1")
 
     # Execute the transaction
     txn = db_client.transaction()
@@ -1325,7 +1343,9 @@ async def destroy_card(
 async def perform_fusion(
     user_id: str,
     result_card_id: str,
-    db_client: AsyncClient
+    db_client: AsyncClient,
+    collection_id: Optional[str] = None,
+    pack_id: Optional[str] = None
 ) -> PerformFusionResponse:
     """
     Perform a fusion operation for a user.
@@ -1340,6 +1360,8 @@ async def perform_fusion(
         user_id: The ID of the user performing the fusion
         result_card_id: The ID of the fusion recipe to use
         db_client: Firestore client
+        collection_id: Optional. The ID of the collection containing the fusion recipe
+        pack_id: Optional. The ID of the pack containing the fusion recipe
 
     Returns:
         PerformFusionResponse with success status, message, and the resulting card
@@ -1356,13 +1378,47 @@ async def perform_fusion(
             raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
 
         # Get the fusion recipe
-        recipe_ref = db_client.collection('fusion_recipes').document(result_card_id)
-        recipe_doc = await recipe_ref.get()
+        fusion_recipes_ref = db_client.collection('fusion_recipes')
+        recipe_doc = None
+        recipe_data = None
 
-        if not recipe_doc.exists:
+        # If collection_id and pack_id are provided, directly access the recipe
+        if collection_id and pack_id:
+            card_ref = fusion_recipes_ref.document(collection_id).collection(collection_id).document(pack_id).collection('cards').document(result_card_id)
+            card_doc = await card_ref.get()
+
+            if card_doc.exists:
+                recipe_doc = card_doc
+                recipe_data = card_doc.to_dict()
+        else:
+            # If collection_id and pack_id are not provided, search through all collections and packs
+            collections_stream = fusion_recipes_ref.stream()
+
+            # Iterate through all pack collections
+            async for collection_doc in collections_stream:
+                pack_collection_id = collection_doc.id
+                # Get all packs in this collection
+                packs_ref = fusion_recipes_ref.document(pack_collection_id).collection(pack_collection_id)
+                packs_stream = packs_ref.stream()
+
+                # For each pack, check if it contains the recipe
+                async for pack_doc in packs_stream:
+                    pack_id = pack_doc.id
+
+                    # Check if the cards collection has the result_card_id
+                    card_ref = packs_ref.document(pack_id).collection('cards').document(result_card_id)
+                    card_doc = await card_ref.get()
+
+                    if card_doc.exists:
+                        recipe_doc = card_doc
+                        recipe_data = card_doc.to_dict()
+                        break
+
+                if recipe_doc:
+                    break
+
+        if not recipe_doc or not recipe_data:
             raise HTTPException(status_code=404, detail=f"Fusion recipe with ID '{result_card_id}' not found")
-
-        recipe_data = recipe_doc.to_dict()
 
         # Check if the user has all required ingredients
         ingredients = recipe_data.get('ingredients', [])
@@ -2626,15 +2682,40 @@ async def check_card_missing(
         # Process each fusion recipe
         for recipe_id in fusion_recipe_ids:
             # Get the fusion recipe
-            recipe_ref = db_client.collection('fusion_recipes').document(recipe_id)
-            recipe_doc = await recipe_ref.get()
+            # First, we need to find which pack collection this recipe belongs to
+            fusion_recipes_ref = db_client.collection('fusion_recipes')
+            collections_stream = fusion_recipes_ref.stream()
 
-            if not recipe_doc.exists:
+            recipe_doc = None
+            recipe_data = None
+
+            # Iterate through all pack collections
+            async for collection_doc in collections_stream:
+                pack_collection_id = collection_doc.id
+                # Get all packs in this collection
+                packs_ref = fusion_recipes_ref.document(pack_collection_id).collection(pack_collection_id)
+                packs_stream = packs_ref.stream()
+
+                # For each pack, check if it contains the recipe
+                async for pack_doc in packs_stream:
+                    pack_id = pack_doc.id
+
+                    # Check if the cards collection has the recipe_id
+                    card_ref = packs_ref.document(pack_id).collection('cards').document(recipe_id)
+                    card_doc = await card_ref.get()
+
+                    if card_doc.exists:
+                        recipe_doc = card_doc
+                        recipe_data = card_doc.to_dict()
+                        break
+
+                if recipe_doc:
+                    break
+
+            if not recipe_doc or not recipe_data:
                 # Skip non-existent recipes and continue with the next one
                 logger.warning(f"Fusion recipe with ID '{recipe_id}' not found")
                 continue
-
-            recipe_data = recipe_doc.to_dict()
 
             # Initialize recipe missing cards info
             recipe_missing_cards = FusionRecipeMissingCards(
@@ -2951,6 +3032,241 @@ async def get_withdraw_request_by_id(request_id: str, user_id: str, db_client: A
 
 
 
+
+
+async def update_withdraw_request(request_id: str, user_id: str, cards_to_withdraw: List[Dict[str, Any]], address_id: Optional[str] = None, phone_number: Optional[str] = None, db_client: AsyncClient = None) -> WithdrawRequestDetail:
+    """
+    Update an existing withdraw request with new cards.
+
+    This function:
+    1. Retrieves the existing withdraw request
+    2. Validates the user and address
+    3. Validates the new cards to withdraw
+    4. Updates the withdraw request with the new cards
+    5. Returns the updated withdraw request
+
+    Args:
+        request_id: The ID of the withdraw request to update
+        user_id: The ID of the user who owns the withdraw request
+        cards_to_withdraw: List of dictionaries containing card_id, quantity, and subcollection_name for each card to withdraw
+        address_id: The ID of the address to ship the cards to (optional)
+        phone_number: The phone number of the recipient for shipping purposes (optional)
+        db_client: Firestore client
+
+    Returns:
+        WithdrawRequestDetail object containing the updated withdraw request details
+
+    Raises:
+        HTTPException: If there's an error updating the withdraw request
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the withdraw request
+        withdraw_request_ref = user_ref.collection('withdraw_requests').document(request_id)
+        withdraw_request_doc = await withdraw_request_ref.get()
+
+        if not withdraw_request_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Withdraw request with ID {request_id} not found for user {user_id}")
+
+        # Get the withdraw request data
+        withdraw_request_data = withdraw_request_doc.to_dict()
+
+        # Get shipping address from existing request
+        shipping_address = withdraw_request_data.get('shipping_address')
+
+        # Update shipping address if address_id is provided
+        if address_id:
+            # Get user data to find the address
+            user_data = user_doc.to_dict()
+            user_addresses = user_data.get('addresses', [])
+
+            # Find the address with the given ID
+            new_shipping_address = None
+            for address in user_addresses:
+                if address.get('id') == address_id:
+                    new_shipping_address = address
+                    break
+
+            if not new_shipping_address:
+                raise HTTPException(status_code=404, detail=f"Address with ID {address_id} not found for user {user_id}")
+
+            # Update shipping address
+            shipping_address = new_shipping_address
+
+        # Check if the withdraw request is in a state that can be updated
+        status = withdraw_request_data.get('status', 'pending')
+        if status != 'pending':
+            raise HTTPException(status_code=400, detail=f"Cannot update withdraw request with status '{status}'. Only 'pending' requests can be updated.")
+
+        # Validate cards to withdraw
+        if not cards_to_withdraw:
+            raise HTTPException(status_code=400, detail="No cards specified for withdrawal")
+
+        # Get the existing cards in the withdraw request
+        request_cards_ref = withdraw_request_ref.collection('cards')
+        existing_cards_docs = await request_cards_ref.get()
+
+        # Create a map of existing cards for easy lookup
+        existing_cards = {}
+        for card_doc in existing_cards_docs:
+            existing_cards[card_doc.id] = card_doc.to_dict()
+
+        # Prepare data for transaction
+        cards_data = []
+        for card_info in cards_to_withdraw:
+            card_id = card_info.get('card_id')
+            quantity = card_info.get('quantity', 1)
+            subcollection_name = card_info.get('subcollection_name')
+
+            if not card_id:
+                raise HTTPException(status_code=400, detail="Card ID is required for each card")
+
+            if not subcollection_name:
+                raise HTTPException(status_code=400, detail=f"Subcollection name is required for card {card_id}")
+
+            if quantity <= 0:
+                raise HTTPException(status_code=400, detail=f"Quantity must be greater than 0 for card {card_id}")
+
+            # Get the card from the source subcollection
+            source_card_ref = user_ref.collection('cards').document('cards').collection(subcollection_name).document(card_id)
+            source_card_doc = await source_card_ref.get()
+
+            if not source_card_doc.exists:
+                raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found in subcollection {subcollection_name}")
+
+            source_card_data = source_card_doc.to_dict()
+            card = UserCard(**source_card_data)
+            card_quantity = card.quantity
+
+            # If the card is already in the withdraw request, add its quantity to the available quantity
+            if card_id in existing_cards:
+                existing_card_data = existing_cards[card_id]
+                existing_quantity = existing_card_data.get('quantity', 0)
+                card_quantity += existing_quantity
+
+            if quantity > card_quantity:
+                raise HTTPException(status_code=400, detail=f"Cannot withdraw/ship {quantity} of card {card_id}, only {card_quantity} available")
+
+            # Get the main card reference and pre-fetch it
+            main_card_ref = user_ref.collection('cards').document(card_id)
+            main_card_doc = await main_card_ref.get()
+
+            # Add card data to the list
+            cards_data.append({
+                'card_id': card_id,
+                'quantity': quantity,
+                'subcollection_name': subcollection_name,
+                'source_card_ref': source_card_ref,
+                'source_card_data': source_card_data,
+                'remaining_quantity': card_quantity - quantity,
+                'main_card_ref': main_card_ref,
+                'main_card_doc': main_card_doc,
+                'request_card_ref': request_cards_ref.document(card_id),
+                'existing_quantity': existing_cards.get(card_id, {}).get('quantity', 0)
+            })
+
+        # Create transaction to process all cards
+        @firestore.async_transactional
+        async def update_withdraw_request_transaction(transaction):
+            # Update the withdraw request document
+            now = datetime.now()
+            request_data = {
+                'request_date': now,
+                'status': 'pending',  # Reset status to pending
+                'shipping_status': 'pending',  # Reset shipping status
+                'card_count': len(cards_data),  # Update count of cards in this request
+            }
+
+            # Only include shipping_address if it's available
+            if shipping_address:
+                request_data['shipping_address'] = shipping_address
+            transaction.update(withdraw_request_ref, request_data)
+
+            # Delete all existing cards in the withdraw request
+            for card_id, card_data in existing_cards.items():
+                # Return the card to the user's collection
+                subcollection_name = card_data.get('subcollection_name', 'cards')
+                quantity = card_data.get('quantity', 0)
+
+                # Get the card from the user's collection
+                user_card_ref = user_ref.collection('cards').document('cards').collection(subcollection_name).document(card_id)
+                user_card_doc = await user_card_ref.get()
+
+                if user_card_doc.exists:
+                    # Update the quantity in the user's collection
+                    user_card_data = user_card_doc.to_dict()
+                    new_quantity = user_card_data.get('quantity', 0) + quantity
+                    transaction.update(user_card_ref, {"quantity": new_quantity})
+                else:
+                    # Card doesn't exist in user's collection, create it
+                    card_data_copy = card_data.copy()
+                    card_data_copy['quantity'] = quantity
+                    transaction.set(user_card_ref, card_data_copy)
+
+                # Delete the card from the withdraw request
+                transaction.delete(request_cards_ref.document(card_id))
+
+            # Process each new card
+            for card_data in cards_data:
+                card_id = card_data['card_id']
+                quantity_to_withdraw = card_data['quantity']
+                source_card_ref = card_data['source_card_ref']
+                source_card_data = card_data['source_card_data']
+                remaining_quantity = card_data['remaining_quantity']
+                main_card_ref = card_data['main_card_ref']
+                main_card_doc = card_data['main_card_doc']
+                request_card_ref = card_data['request_card_ref']
+                existing_quantity = card_data['existing_quantity']
+
+                # Prepare the card data for the request cards subcollection
+                request_card_data = source_card_data.copy()
+                request_card_data['quantity'] = quantity_to_withdraw
+                request_card_data['subcollection_name'] = card_data['subcollection_name']
+
+                # Add the card to the request cards subcollection
+                transaction.set(request_card_ref, request_card_data)
+
+                # Calculate the actual quantity to remove from the user's collection
+                quantity_to_remove = quantity_to_withdraw - existing_quantity
+
+                if quantity_to_remove > 0:
+                    # Update the quantity in the source subcollection
+                    new_source_quantity = source_card_data.get('quantity', 0) - quantity_to_remove
+
+                    if new_source_quantity <= 0:
+                        # Delete the card from the source subcollection if quantity is 0
+                        transaction.delete(source_card_ref)
+
+                        # Also delete from the main cards collection if it exists
+                        if main_card_doc.exists:
+                            transaction.delete(main_card_ref)
+                    else:
+                        # Update the quantity in the source subcollection
+                        transaction.update(source_card_ref, {"quantity": new_source_quantity})
+
+                        # Also update in the main cards collection if it exists
+                        if main_card_doc.exists:
+                            transaction.update(main_card_ref, {"quantity": new_source_quantity})
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await update_withdraw_request_transaction(transaction)
+
+        # Get the updated withdraw request
+        updated_withdraw_request = await get_withdraw_request_by_id(request_id, user_id, db_client)
+        return updated_withdraw_request
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
 
 async def get_user_pack_opening_history(user_id: str, page: int = 1, per_page: int = 10) -> Dict[str, Any]:

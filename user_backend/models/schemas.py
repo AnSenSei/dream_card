@@ -357,6 +357,12 @@ class UpdateWithdrawRequestStatusRequest(BaseModel):
     status: str = Field(..., description="The new status for the withdraw request (e.g., 'pending', 'label_created', 'shipped', 'delivered')")
     shipping_status: str = Field(..., description="The new shipping status for the withdraw request (e.g., 'label_created', 'shipped', 'delivered')")
 
+class UpdateWithdrawCardsRequest(BaseModel):
+    """Request model for updating cards in a withdraw request"""
+    cards: List[CardToWithdraw] = Field(..., description="Updated list of cards to withdraw")
+    address_id: Optional[str] = Field(None, description="The ID of the address to ship the cards to")
+    phone_number: Optional[str] = Field(None, description="The phone number of the recipient for shipping purposes")
+
 class WithdrawRequestsResponse(BaseModel):
     """Response model for listing withdraw requests with pagination"""
     withdraw_requests: List[WithdrawRequest]
@@ -391,6 +397,10 @@ class PayPointOfferRequest(BaseModel):
     """Request model for paying a point offer"""
     offer_id: str = Field(..., description="The ID of the offer to pay")
 
+class PayPricePointRequest(BaseModel):
+    """Request model for paying a price point directly"""
+    quantity: int = Field(1, description="The quantity of cards to buy (default: 1)")
+
 class LikeUserRequest(BaseModel):
     """Request model for liking another user"""
     target_user_id: str = Field(..., description="The ID of the user to like")
@@ -402,6 +412,28 @@ class LikeUserResponse(BaseModel):
     user_id: str
     target_user_id: str
     liked_at: datetime
+
+class CalculateLevelResponse(BaseModel):
+    """Response model for calculating a user's level"""
+    user_id: str
+    previous_level: int
+    current_level: int
+    total_drawn: int
+
+class LevelRankEntry(BaseModel):
+    """
+    Represents a user's rank entry based on their level (determined by total_drawn).
+    The format is "user_id:total_drawn" where total_drawn is the total number of cards drawn by the user.
+    Now includes avatar and display name for more detailed information.
+    """
+    user_id: str
+    total_drawn: int
+    level: int
+    display_name: Optional[str] = None
+    avatar: Optional[str] = None
+
+    def __str__(self) -> str:
+        return f"{self.user_id}:{self.total_drawn}"
 
 # Note: For file uploads, we don't use a Pydantic model
 # The avatar upload endpoint will use FastAPI's File and UploadFile directly

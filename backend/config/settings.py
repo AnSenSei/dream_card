@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     # User backend service configuration
     user_backend_url: str = "http://localhost:8082/users/api/v1"
 
+    # Algolia settings
+    application_id: str
+    algolia_api_key: str
+    algolia_index_name_pokemon: str
+    algolia_index_name_one_piece: str
+
     # Logging settings
     log_level: str = "INFO"
 

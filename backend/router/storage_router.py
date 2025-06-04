@@ -84,20 +84,23 @@ async def get_all_cards_endpoint(
     per_page: int = Query(10, ge=1, le=100, description="Number of items per page"),
     sort_by: str = Query("point_worth", description="Field to sort by (e.g., point_worth, card_name, date_got_in_stock, quantity, rarity)"),
     sort_order: str = Query("desc", description="Sort order: 'asc' or 'desc'"),
-    search_query: str | None = Query(None, description="Search query for card name (prefix match)")
+    search_query: str | None = Query(None, description="Search query for card name (prefix match)"),
+    card_id: str | None = Query(None, description="Filter by specific card ID")
 ):
     """
-    Endpoint to retrieve all stored card information with pagination, sorting, and name search.
+    Endpoint to retrieve all stored card information with pagination, sorting, and search capabilities.
     - **collectionName**: Optional Firestore collection name.
     - **page**: Page number to retrieve (default: 1).
     - **per_page**: Number of items per page (default: 10, max: 100).
     - **sort_by**: Field to sort cards by (default: point_worth). Valid fields: point_worth, card_name, date_got_in_stock, quantity, rarity.
     - **sort_order**: Sort order, 'asc' or 'desc' (default: desc).
     - **search_query**: Optional search term for card name (prefix match).
+    - **card_id**: Optional filter to search for a specific card by ID.
     """
     logger.info(
         f"Received request to get all stored cards. Collection: {collectionName if collectionName else 'default'}, "
-        f"Page: {page}, PerPage: {per_page}, SortBy: {sort_by}, SortOrder: {sort_order}, Search: {search_query}"
+        f"Page: {page}, PerPage: {per_page}, SortBy: {sort_by}, SortOrder: {sort_order}, "
+        f"Search: {search_query}, CardID: {card_id}"
     )
     try:
         # Pass all parameters to the service function
@@ -107,7 +110,8 @@ async def get_all_cards_endpoint(
             per_page=per_page,
             sort_by=sort_by,
             sort_order=sort_order,
-            search_query=search_query
+            search_query=search_query,
+            card_id=card_id
         )
         return card_list_response
     except HTTPException as e:

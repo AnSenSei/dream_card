@@ -318,7 +318,7 @@ async def create_card_listing(
             "pricePoints": listing_request.pricePoints,
             "priceCash": listing_request.priceCash,
             "image_url": user_card.image_url,  # Add image_url from the user's card
-            "card_name": listing_request.card_name if listing_request.card_name else user_card.card_name  # Use card_name from request or user's card
+            "card_name": user_card.card_name  # Use card_name from request or user's card
         }
 
         # Add expiration date if provided
@@ -1896,6 +1896,285 @@ async def get_user_marketplace_transactions(
         raise HTTPException(status_code=500, detail=f"Failed to get marketplace transactions: {str(e)}")
 
 
+async def pay_price_point(
+    user_id: str,
+    listing_id: str,
+    quantity: int,
+    db_client: AsyncClient
+) -> Dict[str, Any]:
+    """
+    Pay for a price point directly, which will:
+    1. Deduct points from the user's account
+    2. Add points to the seller's account
+    3. Add the card to the user's collection
+    4. Deduct quantity from the listing
+    5. Delete the listing if quantity becomes zero
+    6. Deduct locked_quantity from the seller's card
+    7. Delete the seller's card if both quantity and locked_quantity are zero
+    8. Insert data into the marketplace_transactions Firestore collection
+    9. Insert data into the marketplace_transactions SQL table
+
+    Args:
+        user_id: The ID of the user paying for the price point
+        listing_id: The ID of the listing
+        quantity: The quantity of cards to buy (default: 1)
+        db_client: Firestore async client
+
+    Returns:
+        Dictionary with success message and details
+
+    Raises:
+        HTTPException: If there's an error paying for the price point
+    """
+    logger = get_logger(__name__)
+    try:
+        # 1. Verify user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        user_data = user_doc.to_dict()
+
+        # 2. Verify listing exists
+        listing_ref = db_client.collection('listings').document(listing_id)
+        listing_doc = await listing_ref.get()
+        if not listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Listing with ID {listing_id} not found")
+
+        listing_data = listing_doc.to_dict()
+
+        # 3. Get the seller information
+        seller_ref_path = listing_data.get("owner_reference", "")
+        if not seller_ref_path:
+            raise HTTPException(status_code=500, detail="Invalid listing data: missing owner reference")
+
+        seller_id = seller_ref_path.split('/')[-1]
+
+        # 4. Verify the user is not the seller
+        if seller_id == user_id:
+            raise HTTPException(status_code=400, detail="You cannot buy your own listing")
+
+        # 5. Verify the listing has a pricePoints field
+        price_points = listing_data.get("pricePoints")
+        if price_points is None:
+            raise HTTPException(status_code=400, detail="This listing does not have a price in points")
+
+        # 6. Verify the user has enough points
+        total_points_to_pay = price_points * quantity
+        user_points = user_data.get("pointsBalance", 0)
+
+        if user_points < total_points_to_pay:
+            raise HTTPException(status_code=400, detail=f"Insufficient points. You have {user_points} points, but {total_points_to_pay} are required.")
+
+        # 7. Get card information
+        card_reference = listing_data.get("card_reference", "")
+        collection_id = listing_data.get("collection_id", "")
+
+        if not card_reference or not collection_id:
+            raise HTTPException(status_code=500, detail="Invalid listing data: missing card reference or collection ID")
+
+        # 8. Verify the listing has enough quantity
+        listing_quantity = listing_data.get("quantity", 0)
+        if listing_quantity < quantity:
+            raise HTTPException(status_code=400, detail=f"Not enough cards available. Requested: {quantity}, Available: {listing_quantity}")
+
+        # 9. Create a transaction ID
+        transaction_id = f"tx_direct_{listing_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        # 10. Get all point offers for this listing (for cleanup if listing quantity becomes zero)
+        point_offers_ref = listing_ref.collection('point_offers')
+        point_offers = await point_offers_ref.get()
+
+        # 11. Get all cash offers for this listing (for cleanup if listing quantity becomes zero)
+        cash_offers_ref = listing_ref.collection('cash_offers')
+        cash_offers = await cash_offers_ref.get()
+
+        # 12. Execute the transaction
+        @firestore.async_transactional
+        async def _txn(tx: firestore.AsyncTransaction):
+            # a. Deduct points from the user and increment buy_deal
+            tx.update(user_ref, {
+                "pointsBalance": firestore.Increment(-total_points_to_pay),
+                "buy_deal": firestore.Increment(1)
+            })
+
+            # b. Add points to the seller and increment sell_deal
+            seller_ref = db_client.collection(settings.firestore_collection_users).document(seller_id)
+            tx.update(seller_ref, {
+                "pointsBalance": firestore.Increment(total_points_to_pay),
+                "sell_deal": firestore.Increment(1)
+            })
+
+            # c. Update the listing quantity
+            new_quantity = listing_quantity - quantity
+
+            if new_quantity <= 0:
+                # Delete all point offers for this listing
+                for offer in point_offers:
+                    tx.delete(point_offers_ref.document(offer.id))
+
+                # Delete all cash offers for this listing
+                for offer in cash_offers:
+                    tx.delete(cash_offers_ref.document(offer.id))
+
+                # Delete the listing if quantity becomes zero
+                tx.delete(listing_ref)
+            else:
+                # Update the listing quantity
+                tx.update(listing_ref, {
+                    "quantity": new_quantity
+                })
+
+            # d. Deduct locked_quantity from the seller's card
+            try:
+                # Parse card_reference to get card_id
+                card_id = card_reference.split('/')[-1]
+
+                # Get reference to the seller's card
+                seller_card_ref = seller_ref.collection('cards').document('cards').collection(collection_id).document(card_id)
+
+                # Get the seller's card to check current values
+                seller_card_doc = await seller_card_ref.get()
+
+                if seller_card_doc.exists:
+                    seller_card_data = seller_card_doc.to_dict()
+                    current_locked_quantity = seller_card_data.get('locked_quantity', 0)
+                    current_card_quantity = seller_card_data.get('quantity', 0)
+
+                    # Ensure we don't go below zero for locked_quantity
+                    new_locked_quantity = max(0, current_locked_quantity - quantity)
+
+                    # Check if both quantity and locked_quantity will be zero
+                    if current_card_quantity == 0 and new_locked_quantity == 0:
+                        # Delete the card from the seller's collection
+                        tx.delete(seller_card_ref)
+                        logger.info(f"Deleted card {card_id} from seller {seller_id}'s collection as both quantity and locked_quantity are zero")
+                    else:
+                        # Update the card with decremented locked_quantity
+                        tx.update(seller_card_ref, {
+                            'locked_quantity': new_locked_quantity
+                        })
+                        logger.info(f"Updated locked_quantity for card {card_id} in seller {seller_id}'s collection to {new_locked_quantity}")
+            except Exception as e:
+                logger.error(f"Error updating seller's card: {e}", exc_info=True)
+                # Continue with the transaction even if updating the seller's card fails
+                # This ensures the main transaction still completes
+
+            # e. Create a marketplace transaction record
+            transaction_ref = db_client.collection('marketplace_transactions').document(transaction_id)
+            transaction_data = {
+                "id": transaction_id,
+                "listing_id": listing_id,
+                "seller_id": seller_id,
+                "buyer_id": user_id,
+                "card_id": card_reference.split('/')[-1],
+                "quantity": quantity,
+                "price_points": total_points_to_pay,
+                "price_card_id": None,
+                "price_card_qty": None,
+                "traded_at": datetime.now()
+            }
+            tx.set(transaction_ref, transaction_data)
+
+        # Execute the transaction
+        transaction = db_client.transaction()
+        await _txn(transaction)
+
+        # 13. Insert data into the marketplace_transactions SQL table
+        # Use a single database connection for the SQL operation to ensure transaction integrity
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                # Begin transaction
+                conn.autocommit = False
+
+                # Record the transaction in marketplace_transactions table
+                cursor.execute(
+                    """
+                    INSERT INTO marketplace_transactions (listing_id, seller_id, buyer_id, card_id, quantity, price_points, price_card_id, price_card_qty, traded_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (listing_id, seller_id, user_id, card_reference.split('/')[-1], quantity, total_points_to_pay, None, None, datetime.now())
+                )
+                sql_transaction_id = cursor.fetchone()[0]
+                logger.info(f"Created marketplace transaction record with ID {sql_transaction_id}")
+
+                # Commit the transaction
+                conn.commit()
+                logger.info(f"Successfully committed SQL database transaction for marketplace transaction {transaction_id}")
+                logger.info(f"Recorded marketplace transaction: listing {listing_id}, seller {seller_id}, buyer {user_id}, points {total_points_to_pay}")
+
+            except Exception as e:
+                # Rollback on error
+                conn.rollback()
+                logger.error(f"SQL database transaction failed, rolling back: {str(e)}", exc_info=True)
+                # Continue with the response - we've already completed the Firestore transaction,
+                # so we don't want to fail the whole operation just because of a database issue
+                logger.warning("SQL database transaction failed but Firestore transaction was successful")
+
+            finally:
+                # Close cursor (connection will be closed by context manager)
+                cursor.close()
+
+        # 14. Add the card to the user's collection
+        try:
+            # Add the card to the user's collection multiple times based on quantity
+            card_references = [card_reference] * quantity
+            for card_ref in card_references:
+                await add_card_to_user(
+                    user_id=user_id,
+                    card_reference=card_ref,
+                    db_client=db_client,
+                    collection_metadata_id=collection_id,
+                    from_marketplace=True
+                )
+        except Exception as e:
+            logger.error(f"Error adding card to user {user_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Transaction completed but failed to add card to user: {str(e)}")
+
+        # 15. Send email notification to the seller
+        try:
+            # Get the seller's user details
+            seller = await get_user_by_id(seller_id, db_client)
+
+            # Get the buyer's user details
+            buyer = await get_user_by_id(user_id, db_client)
+
+            if seller and seller.email:
+                # Send the email notification
+                await send_item_sold_email(
+                    to_email=seller.email,
+                    to_name=seller.displayName,
+                    listing_data=listing_data,
+                    offer_type="direct",
+                    offer_amount=total_points_to_pay,
+                    buyer_name=buyer.displayName if buyer else "a user"
+                )
+                logger.info(f"Sent item sold email to {seller.email}")
+            else:
+                logger.warning(f"Could not send email notification: Seller {seller_id} not found or has no email")
+        except Exception as e:
+            # Log the error but don't fail the whole operation if email sending fails
+            logger.error(f"Error sending item sold email: {e}", exc_info=True)
+
+        logger.info(f"Successfully paid price point for listing {listing_id} by user {user_id}")
+        return {
+            "message": f"Successfully paid price point",
+            "transaction_id": transaction_id,
+            "listing_id": listing_id,
+            "points_paid": total_points_to_pay,
+            "quantity": quantity,
+            "remaining_points": user_points - total_points_to_pay
+        }
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error paying price point for listing {listing_id} by user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to pay price point: {str(e)}")
+
 async def pay_point_offer(
     user_id: str,
     listing_id: str,
@@ -2016,15 +2295,17 @@ async def pay_point_offer(
         # 11. Execute the transaction
         @firestore.async_transactional
         async def _txn(tx: firestore.AsyncTransaction):
-            # a. Deduct points from the user
+            # a. Deduct points from the user and increment buy_deal
             tx.update(user_ref, {
-                "pointsBalance": firestore.Increment(-points_to_pay)
+                "pointsBalance": firestore.Increment(-points_to_pay),
+                "buy_deal": firestore.Increment(1)
             })
 
-            # Add points to the seller (list owner)
+            # Add points to the seller (list owner) and increment sell_deal
             seller_ref = db_client.collection(settings.firestore_collection_users).document(seller_id)
             tx.update(seller_ref, {
-                "pointsBalance": firestore.Increment(points_to_pay)
+                "pointsBalance": firestore.Increment(points_to_pay),
+                "sell_deal": firestore.Increment(1)
             })
 
             # e. Delete the user's offer from their my_point_offers collection

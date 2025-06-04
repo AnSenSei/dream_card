@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from models.schemas import (UserCard, UserCardsResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest,
                             PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse,
-                            WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse, WithdrawRequestsResponse)
+                            WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse, WithdrawRequestsResponse, UpdateWithdrawCardsRequest)
 from service.card_service import (
     add_multiple_cards_to_user,
     draw_card_from_pack,
@@ -26,6 +26,7 @@ from service.card_service import (
     get_withdraw_request_by_id,
     get_user_pack_opening_history,
     add_to_top_hits,
+    update_withdraw_request,
 )
 from config import get_firestore_client, get_logger
 
@@ -496,6 +497,8 @@ async def add_to_top_hits_route(
 async def perform_fusion_by_recipe_id_route(
     user_id: str = Path(..., description="The ID of the user performing the fusion"),
     result_card_id: str = Path(..., description="The ID of the fusion recipe to use"),
+    collection_id: Optional[str] = Query(None, description="The ID of the collection containing the fusion recipe"),
+    pack_id: Optional[str] = Query(None, description="The ID of the pack containing the fusion recipe"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
@@ -503,16 +506,26 @@ async def perform_fusion_by_recipe_id_route(
 
     This endpoint:
     1. Takes a user ID and fusion recipe ID as path parameters
-    2. Checks if the user has all required ingredients for the fusion
-    3. If yes, performs the fusion by removing ingredient cards and adding the result card
-    4. If no, returns an error message about missing cards
-    5. Returns a success/failure message and the resulting card if successful
+    2. Optionally takes collection_id and pack_id as query parameters for direct recipe access
+    3. Checks if the user has all required ingredients for the fusion
+    4. If yes, performs the fusion by removing ingredient cards and adding the result card
+    5. If no, returns an error message about missing cards
+    6. Returns a success/failure message and the resulting card if successful
+
+    Args:
+        user_id: The ID of the user performing the fusion
+        result_card_id: The ID of the fusion recipe to use
+        collection_id: Optional. The ID of the collection containing the fusion recipe
+        pack_id: Optional. The ID of the pack containing the fusion recipe
+        db: Firestore client
     """
     try:
         fusion_result = await perform_fusion(
             user_id=user_id,
             result_card_id=result_card_id,
-            db_client=db
+            db_client=db,
+            collection_id=collection_id,
+            pack_id=pack_id
         )
         return fusion_result
     except HTTPException:
@@ -656,6 +669,55 @@ async def get_withdraw_request_by_id_route(
     except Exception as e:
         logger.error(f"Error getting withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while retrieving the withdraw request")
+
+
+@router.put("/{user_id}/withdraw-requests/{request_id}", response_model=WithdrawRequestDetail)
+async def update_withdraw_request_route(
+    user_id: str = Path(..., description="The ID of the user who made the withdraw request"),
+    request_id: str = Path(..., description="The ID of the withdraw request to update"),
+    update_request: UpdateWithdrawCardsRequest = Body(..., description="The updated cards to withdraw"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Update an existing withdraw request with new cards.
+
+    This endpoint:
+    1. Takes a user ID and request ID as path parameters
+    2. Takes an UpdateWithdrawCardsRequest in the request body containing:
+       - cards: list of cards to withdraw (each with card_id, quantity, and subcollection_name)
+       - address_id: (optional) ID of the address to ship the cards to
+       - phone_number: (optional) phone number of the recipient
+    3. Updates the withdraw request with the new cards
+    4. Returns the updated withdraw request details
+
+    Note: Only withdraw requests with status 'pending' can be updated.
+    If address_id and phone_number are not provided, the existing values in the withdraw request will be used.
+    """
+    try:
+        # Convert the CardToWithdraw objects to dictionaries
+        cards_to_withdraw = [{"card_id": card.card_id, "quantity": card.quantity, "subcollection_name": card.subcollection_name} for card in update_request.cards]
+
+        # Prepare kwargs for the update_withdraw_request function
+        kwargs = {
+            "request_id": request_id,
+            "user_id": user_id,
+            "cards_to_withdraw": cards_to_withdraw,
+            "db_client": db
+        }
+
+        # Only include address_id and phone_number if they are provided
+        if update_request.address_id is not None:
+            kwargs["address_id"] = update_request.address_id
+        if update_request.phone_number is not None:
+            kwargs["phone_number"] = update_request.phone_number
+
+        updated_withdraw_request = await update_withdraw_request(**kwargs)
+        return updated_withdraw_request
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while updating the withdraw request")
 
 
 

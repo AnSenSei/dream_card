@@ -263,6 +263,9 @@ async def get_cached_card_packs(collection_id: str, db_client: firestore.AsyncCl
             max_win=data.get("max_win"),
             min_win=data.get("min_win"),
             popularity=data.get("popularity", 0),
+            price=data.get("price"),
+            created_at=data.get("created_at"),
+            is_active=data.get("is_active", True)
         ))
 
     # 更新缓存

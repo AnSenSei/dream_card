@@ -8,7 +8,7 @@ from uuid import uuid4
 # from google.oauth2 import service_account # No longer needed here
 
 from models.schemas import StoredCardInfo, PaginationInfo, AppliedFilters, CardListResponse, CollectionMetadata
-from config import get_logger, settings, get_storage_client, get_firestore_client
+from config import get_logger, settings, get_storage_client, get_firestore_client, get_algolia_client, get_algolia_index, get_sorted_index_name
 from utils.gcs_utils import generate_signed_url # Import the utility function
 from datetime import datetime
 
@@ -16,7 +16,7 @@ from datetime import datetime
 import math
 from google.cloud import firestore # For firestore.Query constants
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 
 logger = get_logger(__name__)
 
@@ -289,10 +289,151 @@ async def get_all_stored_cards(
     per_page: int = 10,
     sort_by: str = "point_worth",
     sort_order: str = "desc",
+    search_query: str | None = None,
+    card_id: str | None = None
+) -> CardListResponse:
+    """
+    Retrieves a paginated and sorted list of card information using Algolia.
+    Allows searching by card name or card_id.
+    Generates signed URLs for images.
+    If collection_name is provided, it fetches from that collection, otherwise defaults
+    to settings.firestore_collection_cards.
+
+    If collection_name is provided, it will look up the metadata for that collection
+    in the metadata collection and use the firestoreCollection for the Firestore collection.
+
+    Supports sorting by point_worth, rarity, and quantity.
+    """
+    if not collection_name:
+        effective_collection_name = settings.firestore_collection_cards
+        logger.info(f"collection_name not provided, defaulting to '{effective_collection_name}'.")
+    else:
+        # Try to get the metadata for the collection
+        try:
+            metadata = await get_collection_metadata(collection_name)
+            effective_collection_name = metadata.firestoreCollection
+            logger.info(f"Using metadata for collection '{collection_name}': firestoreCollection='{effective_collection_name}'")
+        except HTTPException as e:
+            if e.status_code == 404:
+                # If metadata not found, use the provided collection_name as is
+                effective_collection_name = collection_name
+                logger.warning(f"Metadata for collection '{collection_name}' not found. Using provided collection_name as is.")
+            else:
+                # For other HTTP exceptions, re-raise
+                raise e
+
+    log_params = {
+        "page": page, "per_page": per_page, "sort_by": sort_by, 
+        "sort_order": sort_order, "collection": effective_collection_name,
+        "search_query": search_query, "card_id": card_id
+    }
+    logger.info(f"Fetching cards with parameters: {log_params}")
+
+    try:
+        # Convert page to 0-based for Algolia (Algolia uses 0-based pagination)
+        algolia_page = page - 1 if page > 0 else 0
+
+        # Get Algolia client and index based on sort criteria and collection
+        client = get_algolia_client()
+        index_name = get_sorted_index_name(sort_by, sort_order, collection_name)
+
+        # In the get_all_stored_cards function, find this section:
+                # Build filters for Algolia
+        filters = []
+        # Note: collection_name is used to determine the index, not as a filter
+        if card_id:
+            filters.append(f'objectID:"{card_id}"')
+        filter_str = " AND ".join(filters) if filters else None
+
+
+        # Set up search parameters
+        search_params = {
+            "hitsPerPage": per_page,
+            "page": algolia_page,
+        }
+        if filter_str:
+            search_params["filters"] = filter_str
+
+        # Execute search
+        res = await client.search_single_index(
+            index_name=index_name,
+            search_params={
+                "query": search_query or "",
+                **search_params
+            }
+        )
+
+        logger.info(f"Algolia search returned {len(res.hits)} hits")
+
+        # Process results
+        cards_list = []
+        for hit in res.hits:
+            try:
+                hit_data = dict(hit)
+                hit_data["id"] = hit_data.get("objectID")
+
+                # Generate signed URL for the card image
+                if hit_data.get("image_url"):
+                    try:
+                        hit_data["image_url"] = await generate_signed_url(hit_data["image_url"])
+                    except Exception as e:
+                        logger.warning(f"Image signing failed for {hit_data['id']}: {e}")
+
+                # Check for required fields
+                required_fields = ["card_name", "rarity", "point_worth"]
+                missing_fields = [f for f in required_fields if f not in hit_data]
+                if missing_fields:
+                    logger.warning(f"Skipping due to missing fields {missing_fields}: {hit_data}")
+                    continue
+
+                cards_list.append(StoredCardInfo(**hit_data))
+
+            except Exception as e:
+                logger.warning(f"Failed to parse hit {hit.get('objectID')}: {e}")
+                continue
+
+        # Create pagination info
+        pagination_info = PaginationInfo(
+            total_items=res.nb_hits,
+            total_pages=res.nb_pages,
+            current_page=page,
+            per_page=per_page
+        )
+
+        # Create filters info
+        applied_filters_info = AppliedFilters(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            search_query=search_query
+        )
+
+        logger.info(f"Successfully fetched {len(cards_list)} cards using Algolia. Total items: {res.nb_hits}.")
+        return CardListResponse(cards=cards_list, pagination=pagination_info, filters=applied_filters_info)
+
+    except Exception as e:
+        logger.error(f"Failed to fetch cards using Algolia: {e}", exc_info=True)
+        # Fall back to Firestore if Algolia fails
+        logger.info("Falling back to Firestore for card retrieval")
+        return await get_all_stored_cards_firestore(
+            collection_name=collection_name,
+            page=page,
+            per_page=per_page,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            search_query=search_query
+        )
+
+async def get_all_stored_cards_firestore(
+    collection_name: str | None = None,
+    page: int = 1,
+    per_page: int = 10,
+    sort_by: str = "point_worth",
+    sort_order: str = "desc",
     search_query: str | None = None
 ) -> CardListResponse:
     """
-    Retrieves a paginated and sorted list of card information from Firestore.
+    Fallback function that retrieves a paginated and sorted list of card information from Firestore.
+    This is used if Algolia search fails.
     Allows searching by card name (prefix match).
     Generates signed URLs for images.
     If collection_name is provided, it fetches from that collection, otherwise defaults
@@ -326,7 +467,7 @@ async def get_all_stored_cards(
         "sort_order": sort_order, "collection": effective_collection_name,
         "search_query": search_query
     }
-    logger.info(f"Fetching cards with parameters: {log_params}")
+    logger.info(f"Fetching cards with parameters (Firestore fallback): {log_params}")
 
     cards_list = []
 
@@ -646,13 +787,41 @@ async def clean_fusion_references(document_id: str, collection_name: str | None 
 
                     if result_card_id:
                         try:
-                            # Delete the fusion recipe
-                            fusion_doc_ref = firestore_client.collection('fusion_recipes').document(result_card_id)
-                            fusion_doc = await fusion_doc_ref.get()
+                            # Find and delete the fusion recipe
+                            # First, we need to find which pack collection this recipe belongs to
+                            fusion_recipes_ref = firestore_client.collection('fusion_recipes')
+                            collections_stream = fusion_recipes_ref.stream()
 
-                            if fusion_doc.exists:
-                                # Get the recipe data to find all ingredients
-                                recipe_data = fusion_doc.to_dict()
+                            fusion_doc = None
+                            recipe_data = None
+                            fusion_doc_ref = None
+
+                            # Iterate through all pack collections
+                            async for collection_doc in collections_stream:
+                                pack_collection_id = collection_doc.id
+                                # Get all packs in this collection
+                                packs_ref = fusion_recipes_ref.document(pack_collection_id).collection(pack_collection_id)
+                                packs_stream = packs_ref.stream()
+
+                                # For each pack, check if it contains the recipe
+                                async for pack_doc in packs_stream:
+                                    pack_id = pack_doc.id
+
+                                    # Check if the cards collection has the result_card_id
+                                    card_ref = packs_ref.document(pack_id).collection('cards').document(result_card_id)
+                                    card_doc = await card_ref.get()
+
+                                    if card_doc.exists:
+                                        fusion_doc = card_doc
+                                        recipe_data = card_doc.to_dict()
+                                        fusion_doc_ref = card_ref
+                                        break
+
+                                if fusion_doc:
+                                    break
+
+                            if fusion_doc and recipe_data:
+                                # Use the recipe data to find all ingredients
 
                                 # Remove fusion information from all ingredient cards
                                 if 'ingredients' in recipe_data and recipe_data['ingredients']:
@@ -694,8 +863,9 @@ async def clean_fusion_references(document_id: str, collection_name: str | None 
                                             logger.error(f"Error removing fusion information from ingredient card: {e}", exc_info=True)
 
                                 # Delete the fusion recipe
+                                # We already have the fusion_doc_ref from the search above
                                 await fusion_doc_ref.delete()
-                                logger.info(f"Deleted fusion recipe '{result_card_id}'")
+                                logger.info(f"Deleted fusion recipe '{result_card_id}' from pack collection '{pack_collection_id}' with pack ID '{pack_id}'")
                         except Exception as e:
                             # Log the error but continue with other fusion recipes
                             logger.error(f"Error deleting fusion recipe '{result_card_id}': {e}", exc_info=True)

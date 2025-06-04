@@ -2,9 +2,9 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Body, Query
 from google.cloud import firestore
 from typing import List, Optional
 
-from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest, AcceptedOffersResponse, AllOffersResponse, PayPointOfferRequest, MarketplaceTransaction
+from models.schemas import CardListing, CreateCardListingRequest, OfferPointsRequest, OfferCashRequest, UpdatePointOfferRequest, UpdateCashOfferRequest, AcceptOfferRequest, AcceptedOffersResponse, AllOffersResponse, PayPointOfferRequest, PayPricePointRequest, MarketplaceTransaction
 from models.marketplace_schemas import PaginatedListingsResponse
-from service.marketplace_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer, get_accepted_offers, get_all_offers, pay_point_offer, get_all_listings, get_user_marketplace_transactions
+from service.marketplace_service import create_card_listing, withdraw_listing, offer_points, withdraw_offer, get_user_listings, get_listing_by_id, offer_cash, withdraw_cash_offer, update_point_offer, update_cash_offer, accept_offer, get_accepted_offers, get_all_offers, pay_point_offer, pay_price_point, get_all_listings, get_user_marketplace_transactions
 from config import get_firestore_client, get_logger
 from config.db_clients import get_algolia_index
 
@@ -544,6 +544,56 @@ async def pay_point_offer_route(
     except Exception as e:
         logger.error(f"Error paying for point offer: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while paying for the point offer")
+
+
+@router.post("/{user_id}/listings/{listing_id}/pay_price_point")
+async def pay_price_point_route(
+    user_id: str = Path(..., description="The ID of the user paying for the price point"),
+    listing_id: str = Path(..., description="The ID of the listing"),
+    request: PayPricePointRequest = Body(..., description="The request containing the quantity of cards to buy"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Pay for a price point directly, which will:
+    1. Deduct points from the user's account
+    2. Add points to the seller's account
+    3. Add the card to the user's collection
+    4. Deduct quantity from the listing
+    5. Delete the listing if quantity becomes zero
+    6. Deduct locked_quantity from the seller's card
+    7. Delete the seller's card if both quantity and locked_quantity are zero
+    8. Insert data into the marketplace_transactions Firestore collection
+    9. Insert data into the marketplace_transactions SQL table
+
+    This endpoint:
+    1. Takes a user ID, listing ID, and quantity as arguments
+    2. Verifies the user exists
+    3. Verifies the listing exists
+    4. Verifies the listing has a pricePoints field
+    5. Verifies the user has enough points
+    6. Deducts points from the user
+    7. Adds points to the seller
+    8. Adds the card to the user's collection
+    9. Deducts quantity from the listing (or deletes it if quantity becomes zero)
+    10. Deducts locked_quantity from the seller's card
+    11. Deletes the seller's card if both quantity and locked_quantity are zero
+    12. Inserts data into the marketplace_transactions Firestore collection
+    13. Inserts data into the marketplace_transactions SQL table
+    14. Returns a success message with details
+    """
+    try:
+        result = await pay_price_point(
+            user_id=user_id,
+            listing_id=listing_id,
+            quantity=request.quantity,
+            db_client=db
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error paying for price point: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while paying for the price point")
 
 
 @router.get("/{user_id}/transactions", response_model=List[MarketplaceTransaction])
