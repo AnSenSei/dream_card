@@ -2,8 +2,8 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Query, Body, File, 
 from typing import Optional, List
 from google.cloud import firestore
 
-from models.schemas import User, Address, CreateAccountRequest, UserEmailAddressUpdate, AddPointsRequest
-from service.user_service import (
+from models.schemas import User, Address, CreateAccountRequest, UserEmailAddressUpdate, AddPointsRequest, CheckReferResponse, GetReferralsResponse, GetReferCodeResponse, LikeUserRequest, LikeUserResponse
+from service.account_service import (
     get_user_by_id,
     update_user_email_and_address,
     add_user_address,
@@ -11,7 +11,11 @@ from service.user_service import (
     add_points_to_user,
     create_account,
     update_user_avatar,
-    update_seed
+    update_seed,
+    check_user_referred,
+    get_user_referrals,
+    get_user_refer_code,
+    like_user
 )
 from config import get_firestore_client, get_logger
 
@@ -90,7 +94,12 @@ async def update_user_email_and_avatar_route(
     Update a user's email and avatar.
     """
     try:
-        updated_user = await update_user_email_and_address(user_id, update_data, db)
+        updated_user = await update_user_email_and_address(
+            user_id=user_id, 
+            email=update_data.email, 
+            db_client=db,
+            avatar=update_data.avatar
+        )
         return updated_user
     except HTTPException:
         raise
@@ -225,3 +234,100 @@ async def update_seed_route(
     except Exception as e:
         logger.error(f"Error updating seed for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while updating the user's seed")
+
+@router.get("/{user_id}/check-refer", response_model=CheckReferResponse)
+async def check_refer_route(
+    user_id: str = Path(..., description="The ID of the user to check"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Check if a user has been referred (has the referred_by field).
+
+    This endpoint:
+    1. Takes a user ID
+    2. Checks if the user has the referred_by field
+    3. Returns a response indicating whether the user has been referred and the referer_id if available
+
+    This is used to determine if the user is using a referral code for the first time.
+    """
+    try:
+        result = await check_user_referred(user_id, db)
+        return CheckReferResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking user referral status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while checking the user referral status")
+
+@router.get("/{user_id}/referrals", response_model=GetReferralsResponse)
+async def get_user_referrals_route(
+    user_id: str = Path(..., description="The ID of the user to get referrals for"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Get all users referred by a specific user.
+
+    This endpoint:
+    1. Takes a user ID
+    2. Gets all users referred by this user from the "refers" subcollection
+    3. Returns a response with the total count and details of each referred user
+
+    This is used to track how many users have been referred by a specific user.
+    """
+    try:
+        result = await get_user_referrals(user_id, db)
+        return GetReferralsResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting user referrals: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while getting the user referrals")
+
+@router.get("/{user_id}/refer-code", response_model=GetReferCodeResponse)
+async def get_user_refer_code_route(
+    user_id: str = Path(..., description="The ID of the user to get the referral code for"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Get a user's referral code.
+
+    This endpoint:
+    1. Takes a user ID
+    2. Gets the user's referral code from the refer_codes collection
+    3. Returns a response with the user ID and referral code
+
+    This is used to get a user's referral code for sharing with others.
+    """
+    try:
+        result = await get_user_refer_code(user_id, db)
+        return GetReferCodeResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting user referral code: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while getting the user referral code")
+
+@router.post("/{user_id}/like", response_model=LikeUserResponse)
+async def like_user_route(
+    user_id: str = Path(..., description="The ID of the user who is liking another user"),
+    like_request: LikeUserRequest = Body(..., description="The request containing the target user ID to like"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Like another user.
+
+    This endpoint:
+    1. Takes a user ID and a target user ID
+    2. Creates a record in the user's 'likes' subcollection
+    3. Returns a response with information about the like action
+
+    This is used to allow users to like other users.
+    """
+    try:
+        result = await like_user(user_id, like_request.target_user_id, db)
+        return LikeUserResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error liking user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while liking the user")

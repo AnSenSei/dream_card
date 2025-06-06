@@ -125,16 +125,17 @@ async def upload_avatar_to_gcs(avatar_data: bytes, user_id: str, content_type: s
         # If content_type is not provided, try to determine it
         if not content_type:
             # Try to determine content type from the binary data
-            import magic
             try:
+                import magic
                 mime = magic.Magic(mime=True)
                 content_type = mime.from_buffer(binary_data)
             except ImportError:
-                # If python-magic is not installed, default to octet-stream
-                content_type = 'application/octet-stream'
+                # If python-magic is not installed, default to jpeg for images
+                logger.warning("python-magic not available, defaulting to image/jpeg")
+                content_type = 'image/jpeg'
             except Exception as e:
                 logger.warning(f"Could not determine content type from binary data: {e}")
-                content_type = 'application/octet-stream'
+                content_type = 'image/jpeg'
 
         # Generate a unique filename for the avatar
         filename = f"{user_id}_{uuid.uuid4()}.{get_file_extension(content_type)}"

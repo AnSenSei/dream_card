@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Form, File, UploadFile, Body
+from fastapi import APIRouter, HTTPException, Depends, Form, File, UploadFile, Body, Query
 from typing import List, Dict, Optional, Any
 import json
 from models.pack_schema import (
@@ -7,7 +7,10 @@ from models.pack_schema import (
     UpdatePackRequest, 
     AddCardToPackRequest,
     AddCardToPackDirectRequest,
-    DeleteCardFromPackRequest
+    DeleteCardFromPackRequest,
+    PaginatedPacksResponse,
+    PaginationInfo,
+    AppliedFilters
 )
 from models.schemas import StoredCardInfo
 from service.packs_service import (
@@ -21,7 +24,8 @@ from service.packs_service import (
     delete_card_from_pack,
     activate_pack_in_firestore,
     delete_pack_in_firestore,
-    get_all_cards_in_pack
+    get_all_cards_in_pack,
+    get_inactive_packs_from_collection
 )
 from config import get_firestore_client, get_storage_client, settings, get_logger
 from google.cloud import firestore, storage
@@ -40,22 +44,77 @@ async def list_packs_route(db: firestore.AsyncClient = Depends(get_firestore_cli
     """Lists all available card packs from Firestore."""
     return await get_all_packs_from_firestore(db)
 
-@router.get("/collection/{collection_id}", response_model=List[CardPack])
+@router.get("/collection/{collection_id}", response_model=PaginatedPacksResponse)
 async def get_packs_in_collection_route(
+    collection_id: str,
+    page: int = Query(1, description="Page number (default: 1)"),
+    per_page: int = Query(10, description="Items per page (default: 10)"),
+    sort_by: Optional[str] = Query("popularity", description="Field to sort by (default: popularity)"),
+    sort_order: str = Query("desc", description="Sort order (asc or desc, default: desc)"),
+    search_query: Optional[str] = Query(None, description="Optional search query to filter packs by name"),
+    search_by_cards: bool = Query(False, description="Whether to search by cards in pack (default: False)"),
+    cursor: Optional[str] = Query(None, description="Cursor for pagination (ID of the last document in the previous page)"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Lists packs under a specific collection in Firestore with pagination, filtering, sorting, and searching.
+
+    Args:
+        collection_id: The ID of the collection to get packs from
+        page: Page number (default: 1)
+        per_page: Items per page (default: 10)
+        sort_by: Field to sort by (default: "popularity")
+        sort_order: Sort order (asc or desc, default: desc)
+        search_query: Optional search query to filter packs by name
+        search_by_cards: Whether to search by cards in pack (default: False)
+        cursor: Optional cursor for pagination (ID of the last document in the previous page)
+        db: Firestore client dependency
+
+    Returns:
+        PaginatedPacksResponse containing:
+            - packs: List of packs in the collection
+            - pagination: Pagination information
+            - filters: Applied filters
+            - next_cursor: Cursor for the next page
+    """
+    result = await get_packs_collection_from_firestore(
+        collection_id=collection_id,
+        db_client=db,
+        page=page,
+        per_page=per_page,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        search_query=search_query,
+        search_by_cards=search_by_cards,
+        cursor=cursor
+    )
+
+    return PaginatedPacksResponse(
+        packs=result["packs"],
+        pagination=result["pagination"],
+        filters=result["filters"],
+        next_cursor=result["next_cursor"]
+    )
+
+@router.get("/collection/{collection_id}/inactive", response_model=List[CardPack])
+async def get_inactive_packs_in_collection_route(
     collection_id: str,
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
-    Lists all packs under a specific collection in Firestore.
+    Lists all inactive packs (where is_active == False) under a specific collection in Firestore.
 
     Args:
-        collection_id: The ID of the collection to get packs from
+        collection_id: The ID of the collection to get inactive packs from
         db: Firestore client dependency
 
     Returns:
-        List of card packs in the collection
+        List of inactive CardPack objects in the collection
     """
-    return await get_packs_collection_from_firestore(collection_id, db)
+    return await get_inactive_packs_from_collection(
+        collection_id=collection_id,
+        db_client=db
+    )
 
 @router.get("/{pack_id}", response_model=CardPack)
 async def get_pack_details_route(
@@ -351,6 +410,52 @@ async def update_max_win_route(
     except Exception as e:
         logger.error(f"Unhandled error in update_max_win_route: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while updating the pack's max_win value.")
+
+@router.patch("/{collection_id}/{pack_id}/min_win", response_model=Dict[str, str])
+async def update_min_win_route(
+    collection_id: str,
+    pack_id: str,
+    min_win: int = Form(...),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Updates the min_win value for a specific pack.
+
+    Args:
+        collection_id: The ID of the pack collection containing the pack
+        pack_id: The ID of the pack to update
+        min_win: The new min_win value for the pack
+        db: Firestore client dependency
+
+    Returns:
+        Dictionary with success message
+    """
+    try:
+        # Pass the collection_id as part of the pack_id path parameter
+        # Format: collection_id/pack_id
+        pack_path = f"{collection_id}/{pack_id}"
+
+        # Create an updates dictionary with just the min_win field
+        updates = {"min_win": min_win}
+
+        # Use the existing update_pack_in_firestore function to update the pack
+        await update_pack_in_firestore(
+            pack_id=pack_path,
+            updates=updates,
+            db_client=db
+        )
+        return {
+            "message": f"Successfully updated min_win to {min_win} for pack '{pack_id}' in collection '{collection_id}'",
+            "pack_id": pack_id,
+            "collection_id": collection_id,
+            "min_win": str(min_win)
+        }
+    except HTTPException:
+        # Re-raise HTTPExceptions from the service layer
+        raise
+    except Exception as e:
+        logger.error(f"Unhandled error in update_min_win_route: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred while updating the pack's min_win value.")
 
 @router.delete("/{collection_id}/{pack_id}", response_model=Dict[str, str])
 async def delete_pack_route(

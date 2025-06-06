@@ -1,11 +1,12 @@
 import uuid
+import time
 from typing import Dict, List, Optional, Any # Ensure 'Any' is imported
 
 from fastapi import HTTPException, UploadFile
 from google.cloud import firestore, storage # firestore.ArrayUnion and firestore.ArrayRemove are part of the firestore module
 
 from config import get_logger
-from models.pack_schema import AddPackRequest, CardPack, AddCardToPackRequest
+from models.pack_schema import AddPackRequest, CardPack, AddCardToPackRequest,PaginationInfo,AppliedFilters,PaginatedPacksResponse
 from models.schemas import StoredCardInfo
 from utils.gcs_utils import generate_signed_url
 
@@ -59,6 +60,7 @@ async def create_pack_in_firestore(
     price = pack_data.price
     win_rate = pack_data.win_rate
     max_win = pack_data.max_win
+    min_win = pack_data.min_win
     is_active = pack_data.is_active
     popularity = pack_data.popularity
 
@@ -131,6 +133,7 @@ async def create_pack_in_firestore(
             "price": price,
             "win_rate": win_rate,
             "max_win": max_win,
+            "min_win": min_win,
             "is_active": is_active,
             "popularity": popularity,
         }
@@ -189,6 +192,7 @@ async def get_all_packs_from_firestore(db_client: firestore.AsyncClient) -> List
                 cards_by_rarity=pack_data.get('cards_by_rarity'),
                 win_rate=pack_data.get('win_rate'),
                 max_win=pack_data.get('max_win'),
+                min_win=pack_data.get('min_win'),
                 popularity=pack_data.get('popularity', 0)
                 # rarity_configurations is intentionally omitted here as per user request
             ))
@@ -198,72 +202,153 @@ async def get_all_packs_from_firestore(db_client: firestore.AsyncClient) -> List
         logger.error(f"Error fetching all packs from Firestore: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Could not retrieve packs from database.")
 
-async def get_packs_collection_from_firestore(collection_id: str, db_client: firestore.AsyncClient) -> List[CardPack]:
+_pack_cache = {}
+CACHE_TTL_SECONDS = 5 * 60  # 缓存 5 分钟
+
+
+async def get_cached_card_packs(collection_id: str, db_client: firestore.AsyncClient, force_refresh: bool = False) -> list[CardPack]:
     """
-    Fetches all packs from a specific collection in Firestore.
-    Generates signed URLs for pack images if available.
+    获取指定 collection_id 下的卡包列表，带本地缓存（TTL）。
+    若 force_refresh=True，则跳过缓存并强制重新拉取 Firestore 数据。
 
     Args:
-        collection_id: The ID of the collection to fetch packs from
-        db_client: Firestore client
+        collection_id: packs 子集合 ID（如 pokemon）
+        db_client: Firestore 异步客户端
+        force_refresh: 是否强制刷新缓存
 
     Returns:
-        List[CardPack]: List of packs in the collection
-
-    Raises:
-        HTTPException: If collection not found or on database error
+        卡包列表（CardPack 实例）
     """
-    logger.info(f"Fetching all packs from collection '{collection_id}' in Firestore.")
-    packs_list = []
+    now = time.time()
+    cache_entry = _pack_cache.get(collection_id)
+
+    if cache_entry and not force_refresh and now - cache_entry["timestamp"] < CACHE_TTL_SECONDS:
+        return cache_entry["data"]
+
+    # 拉取数据
+    collection_ref = db_client.collection("packs").document(collection_id)
+    collection_doc = await collection_ref.get()
+    if not collection_doc.exists:
+        raise ValueError(f"Collection '{collection_id}' not found.")
+
+    packs_ref = (
+        db_client.collection("packs")
+        .document(collection_id)
+        .collection(collection_id)
+        .where("is_active", "==", True)  # ✅ 只获取 active 卡包
+    )
+    docs = await packs_ref.get()
+    packs = []
+
+    for doc in docs:
+        data = doc.to_dict()
+        pack_id = doc.id
+        name = data.get("name", pack_id)
+
+
+
+        # 签名图片 URL
+        image_url = data.get("image_url")
+        signed_image_url = None
+        if image_url and image_url.startswith("gs://"):
+            signed_image_url = await generate_signed_url(image_url)
+        elif image_url:
+            signed_image_url = image_url
+
+        packs.append(CardPack(
+            id=pack_id,
+            name=name,
+            image_url=signed_image_url,
+            win_rate=data.get("win_rate"),
+            max_win=data.get("max_win"),
+            min_win=data.get("min_win"),
+            popularity=data.get("popularity", 0),
+            price=data.get("price"),
+            created_at=data.get("created_at"),
+            is_active=data.get("is_active", True)
+        ))
+
+    # 更新缓存
+    _pack_cache[collection_id] = {
+        "timestamp": now,
+        "data": packs
+    }
+
+    return packs
+
+
+async def get_packs_collection_from_firestore(
+    collection_id: str,
+    db_client: firestore.AsyncClient,
+    page: int = 1,
+    per_page: int = 10,
+    sort_by: Optional[str] = "popularity",
+    sort_order: str = "desc",
+    search_query: Optional[str] = None,
+    search_by_cards: bool = False,
+    cursor: Optional[str] = None  # 保留参数但不使用（in-memory 不需要 cursor）
+) -> Dict[str, Any]:
+    logger.info(f"[In-Memory] Fetching all packs from '{collection_id}'.")
+
+    valid_sort_fields = ["name", "popularity", "win_rate", "max_win", "min_win"]
+    if sort_by not in valid_sort_fields:
+        sort_by = "popularity"
+
+    reverse = sort_order.lower() == "desc"
 
     try:
-        # Check if the collection exists
-        collection_ref = db_client.collection('packs').document(collection_id)
-        collection_doc = await collection_ref.get()
+        all_packs = await get_cached_card_packs(collection_id, db_client, force_refresh=False)
 
-        if not collection_doc.exists:
-            logger.warning(f"Collection '{collection_id}' not found in Firestore.")
-            raise HTTPException(status_code=404, detail=f"Collection '{collection_id}' not found")
+        # Search filtering
+        if search_query:
+            filtered = []
+            for pack in all_packs:
+                if search_by_cards:
+                    card_names = pack.cards.keys() if hasattr(pack, "cards") else []
+                    if any(search_query.lower() in card.lower() for card in card_names):
+                        filtered.append(pack)
+                else:
+                    if search_query.lower() in pack.name.lower():
+                        filtered.append(pack)
+            all_packs = filtered
 
-        # Get all packs in the collection
-        packs_ref = collection_ref.collection(collection_id)
-        packs_stream = packs_ref.stream()
+        # Sort in memory
+        all_packs.sort(key=lambda p: getattr(p, sort_by, 0) or 0, reverse=reverse)
 
-        async for pack_doc in packs_stream:
-            pack_data = pack_doc.to_dict()
-            pack_id = pack_doc.id
-            pack_data['id'] = pack_id
+        # Paginate
+        total_items = len(all_packs)
+        total_pages = (total_items + per_page - 1) // per_page
+        start = (page - 1) * per_page
+        end = start + per_page
+        paginated_packs = all_packs[start:end]
+        next_cursor = paginated_packs[-1].id if len(paginated_packs) == per_page else None
 
-            pack_name = pack_data.get('name', pack_id)
+        pagination_info = PaginationInfo(
+            total_items=total_items,
+            total_pages=total_pages,
+            current_page=page,
+            per_page=per_page
+        )
 
-            # Generate signed URL if GCS URI exists
-            image_url = pack_data.get('image_url')
-            signed_image_url = None
-            if image_url and image_url.startswith('gs://'):
-                signed_image_url = await generate_signed_url(image_url)
-            elif image_url:
-                signed_image_url = image_url
+        filters_info = AppliedFilters(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            search_query=search_query
+        )
 
-            # Create CardPack object
-            pack = CardPack(
-                id=pack_id,
-                name=pack_name,
-                image_url=signed_image_url,
-                win_rate=pack_data.get('win_rate'),
-                max_win=pack_data.get('max_win'),
-                popularity=pack_data.get('popularity', 0)
-            )
-            packs_list.append(pack)
+        logger.info(f"[In-Memory] Returned {len(paginated_packs)} packs (page {page}).")
 
-        logger.info(f"Successfully fetched {len(packs_list)} packs from collection '{collection_id}'.")
-        return packs_list
+        return {
+            "packs": paginated_packs,
+            "pagination": pagination_info,
+            "filters": filters_info,
+            "next_cursor": next_cursor
+        }
 
-    except HTTPException:
-        # Re-raise HTTPExceptions
-        raise
     except Exception as e:
-        logger.error(f"Error fetching packs from collection '{collection_id}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Could not retrieve packs from collection '{collection_id}'.")
+        logger.error(f"Failed to fetch packs (in-memory): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error while retrieving packs.")
+
 
 async def get_pack_by_id_from_firestore(
     pack_id: str, 
@@ -374,6 +459,7 @@ async def _process_pack_document(doc_snapshot, db_client, collection_id):
             cards_by_rarity=pack_data.get('cards_by_rarity'),
             win_rate=pack_data.get('win_rate'),
             max_win=pack_data.get('max_win'),
+            min_win=pack_data.get('min_win'),
             popularity=pack_data.get('popularity', 0),
             rarity_configurations=rarity_configurations # Add fetched rarities
         )
@@ -702,10 +788,27 @@ async def update_pack_in_firestore(
     updates: Dict[str, Any],
     db_client: AsyncClient
 ) -> bool:
-    pack_ref = db_client.collection('packs').document(pack_id)
-    pack_snap = await pack_ref.get()
-    if not pack_snap.exists:
-        raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
+    try:
+        # Check if pack_id contains a slash (indicating collection_id/pack_id format)
+        parts = pack_id.split('/', 1)
+        if len(parts) > 1:
+            # If pack_id includes collection_id (collection_id/pack_id format)
+            collection_id, actual_pack_id = parts
+            logger.info(f"Parsed pack_id '{pack_id}' into collection_id='{collection_id}' and pack_id='{actual_pack_id}'")
+
+            # Construct the reference to the pack document
+            pack_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(actual_pack_id)
+        else:
+            # If just a simple pack_id
+            logger.warning(f"No collection_id found in pack_id '{pack_id}', using it directly as document ID")
+            pack_ref = db_client.collection('packs').document(pack_id)
+
+        pack_snap = await pack_ref.get()
+        if not pack_snap.exists:
+            raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
+    except Exception as e:
+        logger.error(f"Error accessing pack '{pack_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error accessing pack: {str(e)}")
 
     batch = db_client.batch()
 
@@ -723,6 +826,8 @@ async def update_pack_in_firestore(
         pack_level_updates["popularity"] = updates["popularity"]
     if "max_win" in updates:
         pack_level_updates["max_win"] = updates["max_win"]
+    if "min_win" in updates:
+        pack_level_updates["min_win"] = updates["min_win"]
 
     if pack_level_updates: # If there are any top-level fields to update
         batch.update(pack_ref, pack_level_updates)
@@ -885,6 +990,76 @@ async def delete_pack_in_firestore(
     except Exception as e:
         logger.error(f"Error deleting pack: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete pack: {str(e)}")
+
+async def get_inactive_packs_from_collection(collection_id: str, db_client: firestore.AsyncClient) -> list[CardPack]:
+    """
+    Gets all inactive packs (where is_active == False) from a specific collection in Firestore.
+
+    Args:
+        collection_id: The ID of the collection to fetch inactive packs from
+        db_client: Firestore client
+
+    Returns:
+        List of inactive CardPack objects in the collection
+
+    Raises:
+        HTTPException: If collection not found or on database error
+    """
+    logger.info(f"Fetching all inactive packs from collection '{collection_id}' in Firestore.")
+
+    try:
+        # Check if the collection exists
+        collection_ref = db_client.collection("packs").document(collection_id)
+        collection_doc = await collection_ref.get()
+        if not collection_doc.exists:
+            logger.error(f"Collection '{collection_id}' not found.")
+            raise HTTPException(status_code=404, detail=f"Collection '{collection_id}' not found.")
+
+        # Get all inactive packs in the collection
+        packs_ref = (
+            db_client.collection("packs")
+            .document(collection_id)
+            .collection(collection_id)
+            .where("is_active", "==", False)  # Only get inactive packs
+        )
+        docs = await packs_ref.get()
+        inactive_packs = []
+
+        for doc in docs:
+            data = doc.to_dict()
+            pack_id = doc.id
+            name = data.get("name", pack_id)
+
+            # Generate signed URL for the image if available
+            image_url = data.get("image_url")
+            signed_image_url = None
+            if image_url and image_url.startswith("gs://"):
+                signed_image_url = await generate_signed_url(image_url)
+            elif image_url:
+                signed_image_url = image_url
+
+            inactive_packs.append(CardPack(
+                id=pack_id,
+                name=name,
+                image_url=signed_image_url,
+                win_rate=data.get("win_rate"),
+                max_win=data.get("max_win"),
+                min_win=data.get("min_win"),
+                popularity=data.get("popularity", 0),
+                price=data.get("price"),
+                created_at=data.get("created_at"),
+                is_active=data.get("is_active", False)
+            ))
+
+        logger.info(f"Successfully fetched {len(inactive_packs)} inactive packs from collection '{collection_id}'.")
+        return inactive_packs
+
+    except HTTPException:
+        # Re-raise HTTPExceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching inactive packs from collection '{collection_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not retrieve inactive packs from collection '{collection_id}'.")
 
 async def get_all_cards_in_pack(
     collection_id: str,

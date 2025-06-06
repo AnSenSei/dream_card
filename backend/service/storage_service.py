@@ -8,7 +8,7 @@ from uuid import uuid4
 # from google.oauth2 import service_account # No longer needed here
 
 from models.schemas import StoredCardInfo, PaginationInfo, AppliedFilters, CardListResponse, CollectionMetadata
-from config import get_logger, settings, get_storage_client, get_firestore_client
+from config import get_logger, settings, get_storage_client, get_firestore_client, get_algolia_client, get_algolia_index, get_sorted_index_name
 from utils.gcs_utils import generate_signed_url # Import the utility function
 from datetime import datetime
 
@@ -16,7 +16,7 @@ from datetime import datetime
 import math
 from google.cloud import firestore # For firestore.Query constants
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 
 logger = get_logger(__name__)
 
@@ -219,11 +219,10 @@ async def process_new_card_submission(
         doc_snapshot = await doc_ref.get()
 
         if doc_snapshot.exists:
-            logger.error(f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'.")
-            raise HTTPException(
-                status_code=409,  # 409 Conflict is more appropriate than 500
-                detail=f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'."
-            )
+            logger.info(f"A card with the name '{card_name}' already exists in collection '{effective_collection_name}'. Updating quantity.")
+            # Update the quantity of the existing card instead of raising an exception
+            updated_card = await update_card_quantity(card_name, quantity, effective_collection_name)
+            return updated_card
 
         # Generate a signed URL for the image
         try:
@@ -290,10 +289,151 @@ async def get_all_stored_cards(
     per_page: int = 10,
     sort_by: str = "point_worth",
     sort_order: str = "desc",
+    search_query: str | None = None,
+    card_id: str | None = None
+) -> CardListResponse:
+    """
+    Retrieves a paginated and sorted list of card information using Algolia.
+    Allows searching by card name or card_id.
+    Generates signed URLs for images.
+    If collection_name is provided, it fetches from that collection, otherwise defaults
+    to settings.firestore_collection_cards.
+
+    If collection_name is provided, it will look up the metadata for that collection
+    in the metadata collection and use the firestoreCollection for the Firestore collection.
+
+    Supports sorting by point_worth, rarity, and quantity.
+    """
+    if not collection_name:
+        effective_collection_name = settings.firestore_collection_cards
+        logger.info(f"collection_name not provided, defaulting to '{effective_collection_name}'.")
+    else:
+        # Try to get the metadata for the collection
+        try:
+            metadata = await get_collection_metadata(collection_name)
+            effective_collection_name = metadata.firestoreCollection
+            logger.info(f"Using metadata for collection '{collection_name}': firestoreCollection='{effective_collection_name}'")
+        except HTTPException as e:
+            if e.status_code == 404:
+                # If metadata not found, use the provided collection_name as is
+                effective_collection_name = collection_name
+                logger.warning(f"Metadata for collection '{collection_name}' not found. Using provided collection_name as is.")
+            else:
+                # For other HTTP exceptions, re-raise
+                raise e
+
+    log_params = {
+        "page": page, "per_page": per_page, "sort_by": sort_by, 
+        "sort_order": sort_order, "collection": effective_collection_name,
+        "search_query": search_query, "card_id": card_id
+    }
+    logger.info(f"Fetching cards with parameters: {log_params}")
+
+    try:
+        # Convert page to 0-based for Algolia (Algolia uses 0-based pagination)
+        algolia_page = page - 1 if page > 0 else 0
+
+        # Get Algolia client and index based on sort criteria and collection
+        client = get_algolia_client()
+        index_name = get_sorted_index_name(sort_by, sort_order, collection_name)
+
+        # In the get_all_stored_cards function, find this section:
+                # Build filters for Algolia
+        filters = []
+        # Note: collection_name is used to determine the index, not as a filter
+        if card_id:
+            filters.append(f'objectID:"{card_id}"')
+        filter_str = " AND ".join(filters) if filters else None
+
+
+        # Set up search parameters
+        search_params = {
+            "hitsPerPage": per_page,
+            "page": algolia_page,
+        }
+        if filter_str:
+            search_params["filters"] = filter_str
+
+        # Execute search
+        res = await client.search_single_index(
+            index_name=index_name,
+            search_params={
+                "query": search_query or "",
+                **search_params
+            }
+        )
+
+        logger.info(f"Algolia search returned {len(res.hits)} hits")
+
+        # Process results
+        cards_list = []
+        for hit in res.hits:
+            try:
+                hit_data = dict(hit)
+                hit_data["id"] = hit_data.get("objectID")
+
+                # Generate signed URL for the card image
+                if hit_data.get("image_url"):
+                    try:
+                        hit_data["image_url"] = await generate_signed_url(hit_data["image_url"])
+                    except Exception as e:
+                        logger.warning(f"Image signing failed for {hit_data['id']}: {e}")
+
+                # Check for required fields
+                required_fields = ["card_name", "rarity", "point_worth"]
+                missing_fields = [f for f in required_fields if f not in hit_data]
+                if missing_fields:
+                    logger.warning(f"Skipping due to missing fields {missing_fields}: {hit_data}")
+                    continue
+
+                cards_list.append(StoredCardInfo(**hit_data))
+
+            except Exception as e:
+                logger.warning(f"Failed to parse hit {hit.get('objectID')}: {e}")
+                continue
+
+        # Create pagination info
+        pagination_info = PaginationInfo(
+            total_items=res.nb_hits,
+            total_pages=res.nb_pages,
+            current_page=page,
+            per_page=per_page
+        )
+
+        # Create filters info
+        applied_filters_info = AppliedFilters(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            search_query=search_query
+        )
+
+        logger.info(f"Successfully fetched {len(cards_list)} cards using Algolia. Total items: {res.nb_hits}.")
+        return CardListResponse(cards=cards_list, pagination=pagination_info, filters=applied_filters_info)
+
+    except Exception as e:
+        logger.error(f"Failed to fetch cards using Algolia: {e}", exc_info=True)
+        # Fall back to Firestore if Algolia fails
+        logger.info("Falling back to Firestore for card retrieval")
+        return await get_all_stored_cards_firestore(
+            collection_name=collection_name,
+            page=page,
+            per_page=per_page,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            search_query=search_query
+        )
+
+async def get_all_stored_cards_firestore(
+    collection_name: str | None = None,
+    page: int = 1,
+    per_page: int = 10,
+    sort_by: str = "point_worth",
+    sort_order: str = "desc",
     search_query: str | None = None
 ) -> CardListResponse:
     """
-    Retrieves a paginated and sorted list of card information from Firestore.
+    Fallback function that retrieves a paginated and sorted list of card information from Firestore.
+    This is used if Algolia search fails.
     Allows searching by card name (prefix match).
     Generates signed URLs for images.
     If collection_name is provided, it fetches from that collection, otherwise defaults
@@ -327,7 +467,7 @@ async def get_all_stored_cards(
         "sort_order": sort_order, "collection": effective_collection_name,
         "search_query": search_query
     }
-    logger.info(f"Fetching cards with parameters: {log_params}")
+    logger.info(f"Fetching cards with parameters (Firestore fallback): {log_params}")
 
     cards_list = []
 
@@ -647,13 +787,41 @@ async def clean_fusion_references(document_id: str, collection_name: str | None 
 
                     if result_card_id:
                         try:
-                            # Delete the fusion recipe
-                            fusion_doc_ref = firestore_client.collection('fusion_recipes').document(result_card_id)
-                            fusion_doc = await fusion_doc_ref.get()
+                            # Find and delete the fusion recipe
+                            # First, we need to find which pack collection this recipe belongs to
+                            fusion_recipes_ref = firestore_client.collection('fusion_recipes')
+                            collections_stream = fusion_recipes_ref.stream()
 
-                            if fusion_doc.exists:
-                                # Get the recipe data to find all ingredients
-                                recipe_data = fusion_doc.to_dict()
+                            fusion_doc = None
+                            recipe_data = None
+                            fusion_doc_ref = None
+
+                            # Iterate through all pack collections
+                            async for collection_doc in collections_stream:
+                                pack_collection_id = collection_doc.id
+                                # Get all packs in this collection
+                                packs_ref = fusion_recipes_ref.document(pack_collection_id).collection(pack_collection_id)
+                                packs_stream = packs_ref.stream()
+
+                                # For each pack, check if it contains the recipe
+                                async for pack_doc in packs_stream:
+                                    pack_id = pack_doc.id
+
+                                    # Check if the cards collection has the result_card_id
+                                    card_ref = packs_ref.document(pack_id).collection('cards').document(result_card_id)
+                                    card_doc = await card_ref.get()
+
+                                    if card_doc.exists:
+                                        fusion_doc = card_doc
+                                        recipe_data = card_doc.to_dict()
+                                        fusion_doc_ref = card_ref
+                                        break
+
+                                if fusion_doc:
+                                    break
+
+                            if fusion_doc and recipe_data:
+                                # Use the recipe data to find all ingredients
 
                                 # Remove fusion information from all ingredient cards
                                 if 'ingredients' in recipe_data and recipe_data['ingredients']:
@@ -695,8 +863,9 @@ async def clean_fusion_references(document_id: str, collection_name: str | None 
                                             logger.error(f"Error removing fusion information from ingredient card: {e}", exc_info=True)
 
                                 # Delete the fusion recipe
+                                # We already have the fusion_doc_ref from the search above
                                 await fusion_doc_ref.delete()
-                                logger.info(f"Deleted fusion recipe '{result_card_id}'")
+                                logger.info(f"Deleted fusion recipe '{result_card_id}' from pack collection '{pack_collection_id}' with pack ID '{pack_id}'")
                         except Exception as e:
                             # Log the error but continue with other fusion recipes
                             logger.error(f"Error deleting fusion recipe '{result_card_id}': {e}", exc_info=True)
@@ -839,6 +1008,9 @@ async def add_to_official_listing(collection_id: str, card_id: str, quantity: in
     Adds a subcollection with the provided collection_id.
     Adds the card under that subcollection using the actual card data.
 
+    Includes a card_reference field in the format "{effective_collection_name}/{card_id}"
+    that points to the original card in Firestore.
+
     Also updates the original card in Firestore:
     - Creates/increments a new field called quantity_in_offical_marketplace
     - Decreases the quantity field by the specified quantity
@@ -905,10 +1077,12 @@ async def add_to_official_listing(collection_id: str, card_id: str, quantity: in
         # Convert the card model to a dictionary for Firestore
         card_dict = card.model_dump()
 
-        # Add the pricePoints and priceCash fields to the card_dict
+        # Add the pricePoints, priceCash, and collection_id fields to the card_dict
         card_dict['pricePoints'] = pricePoints
         card_dict['priceCash'] = priceCash
         card_dict['quantity'] = quantity  # Set the quantity to the specified quantity
+        card_dict['card_reference'] = f"{effective_collection_name}/{card_id}"  # Add card reference
+        card_dict['collection_id'] = collection_id  # Add collection_id field
 
         # Add the card to the official_listing collection
         # Path: official_listing/{collection_id}/{card_id}
@@ -926,6 +1100,164 @@ async def add_to_official_listing(collection_id: str, card_id: str, quantity: in
     except Exception as e:
         logger.error(f"Error adding card {card_id} from collection {collection_id} to official_listing: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Could not add card to official listing: {str(e)}")
+
+async def get_all_official_listings(collection_id: str) -> List[dict]:
+    """
+    Retrieves all cards from the official_listing collection for a specific collection.
+
+    Args:
+        collection_id: The ID of the collection to get official listings for
+
+    Returns:
+        List[dict]: A list of card data from the official listing
+
+    Raises:
+        HTTPException: 404 if collection not found, 500 for other errors
+    """
+    firestore_client = get_firestore_client()
+
+    try:
+        # Get a reference to the cards subcollection
+        cards_ref = firestore_client.collection("official_listing").document(collection_id).collection("cards")
+
+        # Get all documents from the cards subcollection
+        cards_stream = cards_ref.stream()
+
+        # Create a list to store the card data
+        cards_list = []
+
+        # Iterate through the documents and add them to the list
+        async for card_doc in cards_stream:
+            card_data = card_doc.to_dict()
+            card_data['id'] = card_doc.id  # Add the document ID to the card data
+
+            # Ensure collection_id is in the card data
+            if 'collection_id' not in card_data:
+                card_data['collection_id'] = collection_id
+
+            # Generate signed URL for the image if it's a GCS URI
+            if 'image_url' in card_data and card_data['image_url'].startswith('gs://'):
+                try:
+                    card_data['image_url'] = await generate_signed_url(card_data['image_url'])
+                    logger.debug(f"Generated signed URL for image: {card_data['image_url']}")
+                except Exception as sign_error:
+                    logger.error(f"Failed to generate signed URL for {card_data['image_url']}: {sign_error}")
+                    # Keep the original URL if signing fails
+
+            cards_list.append(card_data)
+
+        logger.info(f"Retrieved {len(cards_list)} cards from official listing for collection {collection_id}")
+        return cards_list
+
+    except Exception as e:
+        logger.error(f"Error retrieving cards from official listing for collection {collection_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not retrieve cards from official listing: {str(e)}")
+
+async def withdraw_from_official_listing(collection_id: str, card_id: str, quantity: int = 1) -> dict:
+    """
+    Withdraws a card from the official_listing collection.
+    This function reverses what add_to_official_listing does:
+    - Gets the card from the official_listing collection
+    - Updates the original card in Firestore:
+      - Increases the quantity field by the specified quantity
+      - Decreases the quantity_in_offical_marketplace field by the specified quantity
+    - Updates the card in the official_listing collection:
+      - Decreases the quantity field by the specified quantity
+      - If the quantity becomes 0, removes the card from the official_listing collection
+
+    Args:
+        collection_id: The ID of the collection the card belongs to
+        card_id: The ID of the card to withdraw from the official listing
+        quantity: The quantity of cards to withdraw from the official listing (default: 1)
+
+    Returns:
+        dict: The data of the withdrawn card
+
+    Raises:
+        HTTPException: 404 if card not found, 500 for other errors
+    """
+    firestore_client = get_firestore_client()
+
+    try:
+        # Get a reference to the card in the official_listing collection
+        official_listing_ref = firestore_client.collection("official_listing").document(collection_id).collection("cards").document(card_id)
+
+        # Get the current card data from the official_listing collection
+        official_listing_doc = await official_listing_ref.get()
+        if not official_listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found in official listing for collection {collection_id}")
+
+        official_listing_data = official_listing_doc.to_dict()
+        current_listing_quantity = official_listing_data.get('quantity', 0)
+
+        if current_listing_quantity < quantity:
+            raise HTTPException(status_code=400, detail=f"Card quantity in official listing ({current_listing_quantity}) is less than requested quantity ({quantity}), cannot withdraw from marketplace")
+
+        # Get the effective collection name for updating the original card
+        if not collection_id:
+            effective_collection_name = settings.firestore_collection_cards
+        else:
+            try:
+                metadata = await get_collection_metadata(collection_id)
+                effective_collection_name = metadata.firestoreCollection
+            except HTTPException as e:
+                if e.status_code == 404:
+                    effective_collection_name = collection_id
+                else:
+                    raise e
+
+        # Get a reference to the original card document
+        original_card_ref = firestore_client.collection(effective_collection_name).document(card_id)
+
+        # Get the current card data
+        original_card_doc = await original_card_ref.get()
+        if not original_card_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Original card with ID {card_id} not found in collection {effective_collection_name}")
+
+        original_card_data = original_card_doc.to_dict()
+
+        # Update the original card:
+        # 1. Increase quantity by the specified quantity
+        # 2. Decrease quantity_in_offical_marketplace by the specified quantity
+        current_quantity = original_card_data.get('quantity', 0)
+        current_marketplace_quantity = original_card_data.get('quantity_in_offical_marketplace', 0)
+
+        # Update the original card
+        await original_card_ref.update({
+            'quantity': current_quantity + quantity,
+            'quantity_in_offical_marketplace': max(0, current_marketplace_quantity - quantity)
+        })
+
+        # Update the card in the official_listing collection
+        new_listing_quantity = current_listing_quantity - quantity
+
+        if new_listing_quantity <= 0:
+            # If the quantity becomes 0 or less, remove the card from the official_listing collection
+            await official_listing_ref.delete()
+            logger.info(f"Removed card {card_id} from collection {collection_id} from official listing (quantity became 0)")
+        else:
+            # Otherwise, update the quantity
+            await official_listing_ref.update({
+                'quantity': new_listing_quantity
+            })
+            logger.info(f"Updated card {card_id} from collection {collection_id} in official listing: decreased quantity by {quantity}")
+
+        logger.info(f"Updated original card: increased quantity by {quantity}, decreased quantity_in_offical_marketplace by {quantity}")
+
+        # Return the updated official_listing_data
+        official_listing_data['quantity'] = new_listing_quantity if new_listing_quantity > 0 else 0
+
+        # Ensure collection_id is in the returned data
+        if 'collection_id' not in official_listing_data:
+            official_listing_data['collection_id'] = collection_id
+
+        return official_listing_data
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error withdrawing card {card_id} from collection {collection_id} from official_listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not withdraw card from official listing: {str(e)}")
 
 async def get_card_by_id(document_id: str, collection_name: str | None = None) -> StoredCardInfo:
     """
