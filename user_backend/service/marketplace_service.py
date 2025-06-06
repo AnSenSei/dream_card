@@ -258,10 +258,17 @@ async def create_card_listing(
 
     This function:
     1. Verifies the user exists
-    2. Checks if the user has the card and enough quantity
-    3. Creates a new document in the "listings" collection
-    4. Reduces the quantity of the card in the user's collection
-    5. Returns the created listing
+    2. If listing with priceCash, checks Stripe Connect status
+       - If not connected, creates a Stripe Connect account and returns onboarding URL
+       - If incomplete, creates a Stripe Dashboard link and returns login URL
+    3. Gets collection_id and card_id from the request
+    4. Gets the user's card to retrieve card_reference and card data
+    5. Checks if the user has enough available quantity
+    6. Creates listing document
+    7. Creates a new document in the "listings" collection
+    8. Updates user's card locked_quantity and quantity in a transaction
+    9. Gets the created listing
+    10. Creates and returns a CardListing object
 
     Args:
         user_id: The ID of the user creating the listing
@@ -269,7 +276,7 @@ async def create_card_listing(
         db_client: Firestore async client
 
     Returns:
-        CardListing: The created listing
+        CardListing: The created listing or a dictionary with onboarding/login URL
 
     Raises:
         HTTPException: If there's an error creating the listing
@@ -281,11 +288,30 @@ async def create_card_listing(
         if not user_doc.exists:
             raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
 
-        # 2. Get collection_id and card_id from the request
+        # 2. If listing with priceCash, check Stripe Connect status
+        if listing_request.priceCash is not None and listing_request.priceCash > 0:
+            from service.payment_service import check_stripe_connect_status, create_stripe_connect_account, create_stripe_dashboard_link
+
+            # Check Stripe Connect status
+            status_result = await check_stripe_connect_status(user_id, db_client)
+            status = status_result.get("status")
+
+            # If status is not ready, handle accordingly
+            if status != "ready":
+                if status == "not_connected":
+                    # Create Stripe Connect account and return onboarding URL
+                    result = await create_stripe_connect_account(user_id, db_client)
+                    return {"onboarding_url": result.get("onboarding_url")}
+                elif status == "incomplete":
+                    # Create Stripe Dashboard link and return login URL
+                    result = await create_stripe_dashboard_link(user_id, db_client)
+                    return {"login_url": result.get("login_url")}
+
+        # 3. Get collection_id and card_id from the request
         collection_id = listing_request.collection_id
         card_id = listing_request.card_id
 
-        # 3. Get the user's card to retrieve card_reference and card data
+        # 4. Get the user's card to retrieve card_reference and card data
         user_card = await get_user_card(
             user_id=user_id,
             collection_id=collection_id,
@@ -296,7 +322,7 @@ async def create_card_listing(
         # Get card_reference from the user's card
         card_reference = user_card.card_reference
 
-        # 4. Check if user has enough available quantity (total quantity minus locked quantity)
+        # 5. Check if user has enough available quantity (total quantity minus locked quantity)
         available_quantity = user_card.quantity
         if available_quantity < listing_request.quantity:
             raise HTTPException(
@@ -307,7 +333,7 @@ async def create_card_listing(
         # Get reference to the card document for the transaction
         card_ref = user_ref.collection('cards').document('cards').collection(collection_id).document(card_id)
 
-        # 4. Create listing document
+        # 6. Create listing document
         now = datetime.now()
         listing_data = {
             "owner_reference": user_ref.path,  # Reference to the seller user document
@@ -325,11 +351,11 @@ async def create_card_listing(
         if listing_request.expiresAt:
             listing_data["expiresAt"] = listing_request.expiresAt
 
-        # 5. Create a new document in the listings collection
+        # 7. Create a new document in the listings collection
         listings_ref = db_client.collection('listings')
         new_listing_ref = listings_ref.document()  # Auto-generate ID
 
-        # 6. Update user's card locked_quantity and quantity in a transaction
+        # 8. Update user's card locked_quantity and quantity in a transaction
         @firestore.async_transactional
         async def _txn(tx: firestore.AsyncTransaction):
             # Increase the locked_quantity
@@ -351,11 +377,11 @@ async def create_card_listing(
         transaction = db_client.transaction()
         await _txn(transaction)
 
-        # 7. Get the created listing
+        # 9. Get the created listing
         listing_doc = await new_listing_ref.get()
         listing_data = listing_doc.to_dict()
 
-        # 8. Create and return a CardListing object
+        # 10. Create and return a CardListing object
         listing = CardListing(
             id=new_listing_ref.id,  # Include the listing ID
             owner_reference=listing_data["owner_reference"],
@@ -541,10 +567,11 @@ async def withdraw_offer(
     1. Verifies the user exists
     2. Verifies the listing exists
     3. Verifies the offer exists and belongs to the user
-    4. Deletes the offer from the listing's "point_offers" subcollection
-    5. Deletes the corresponding offer from the user's "my_point_offers" subcollection
-    6. If it was the highest offer, updates the listing's highestOfferPoints field
-    7. Returns a success message
+    4. Verifies the offer has not been accepted
+    5. Deletes the offer from the listing's "point_offers" subcollection
+    6. Deletes the corresponding offer from the user's "my_point_offers" subcollection
+    7. If it was the highest offer, updates the listing's highestOfferPoints field
+    8. Returns a success message
 
     Args:
         user_id: The ID of the user withdrawing the offer
@@ -590,16 +617,22 @@ async def withdraw_offer(
         my_point_offers_docs = await my_point_offers_query.get()
 
         my_offer_ref = None
+        my_offer_data = None
         for doc in my_point_offers_docs:
-            my_offer_data = doc.to_dict()
+            doc_data = doc.to_dict()
             # Check if this is the same offer by comparing amount and timestamp
-            if (my_offer_data.get("amount") == offer_data.get("amount") and
-                my_offer_data.get("at") == offer_data.get("at")):
+            if (doc_data.get("amount") == offer_data.get("amount") and
+                doc_data.get("at") == offer_data.get("at")):
                 my_offer_ref = doc.reference
+                my_offer_data = doc_data
                 break
 
         if not my_offer_ref:
             logger.warning(f"Could not find corresponding my_offer for offer {offer_id} in user {user_id}'s my_offers collection")
+
+        # 5. Check if the offer has been accepted
+        if my_offer_data and my_offer_data.get('status') == 'accepted':
+            raise HTTPException(status_code=400, detail="Cannot withdraw an accepted offer")
 
         # 5. Check if this is the highest offer
         current_highest_offer = listing_data.get("highestOfferPoints", None)
@@ -673,10 +706,11 @@ async def withdraw_cash_offer(
     1. Verifies the user exists
     2. Verifies the listing exists
     3. Verifies the offer exists and belongs to the user
-    4. Deletes the offer from the listing's "cash_offers" subcollection
-    5. Deletes the corresponding offer from the user's "my_cash_offers" subcollection
-    6. If it was the highest offer, updates the listing's highestOfferCash field
-    7. Returns a success message
+    4. Verifies the offer has not been accepted
+    5. Deletes the offer from the listing's "cash_offers" subcollection
+    6. Deletes the corresponding offer from the user's "my_cash_offers" subcollection
+    7. If it was the highest offer, updates the listing's highestOfferCash field
+    8. Returns a success message
 
     Args:
         user_id: The ID of the user withdrawing the offer
@@ -722,16 +756,22 @@ async def withdraw_cash_offer(
         my_cash_offers_docs = await my_cash_offers_query.get()
 
         my_offer_ref = None
+        my_offer_data = None
         for doc in my_cash_offers_docs:
-            my_offer_data = doc.to_dict()
+            doc_data = doc.to_dict()
             # Check if this is the same offer by comparing amount and timestamp
-            if (my_offer_data.get("amount") == offer_data.get("amount") and
-                my_offer_data.get("at") == offer_data.get("at")):
+            if (doc_data.get("amount") == offer_data.get("amount") and
+                doc_data.get("at") == offer_data.get("at")):
                 my_offer_ref = doc.reference
+                my_offer_data = doc_data
                 break
 
         if not my_offer_ref:
             logger.warning(f"Could not find corresponding my_offer for offer {offer_id} in user {user_id}'s my_offers collection")
+
+        # 5. Check if the offer has been accepted
+        if my_offer_data and my_offer_data.get('status') == 'accepted':
+            raise HTTPException(status_code=400, detail="Cannot withdraw an accepted offer")
 
         # 5. Check if this is the highest offer
         current_highest_offer = listing_data.get("highestOfferCash", None)
@@ -853,7 +893,12 @@ async def offer_points(
         if listing_data.get("status") == "accepted":
             raise HTTPException(status_code=400, detail="This listing already has an accepted offer")
 
-        # 5. Create a new offer document in the "point_offers" subcollection
+        # 5. Check if the listing's pricePoints is null or zero
+        price_points = listing_data.get("pricePoints")
+        if price_points is None or price_points == 0:
+            raise HTTPException(status_code=400, detail="This listing does not accept point offers")
+
+        # 6. Create a new offer document in the "point_offers" subcollection
         now = datetime.now()
         expires_at = now + timedelta(days=expired)  # Calculate expiration date
 
@@ -953,11 +998,12 @@ async def update_point_offer(
     1. Verifies the user exists
     2. Verifies the listing exists
     3. Verifies the offer exists and belongs to the user
-    4. Verifies the new amount is higher than the current amount
-    5. Updates the offer document in the "point_offers" subcollection under the listing
-    6. Updates the corresponding offer in the user's "my_point_offers" subcollection
-    7. If it becomes the highest offer, updates the highestOfferPoints field in the listing document
-    8. Returns the updated listing
+    4. Verifies the offer has not been accepted
+    5. Verifies the new amount is higher than the current amount
+    6. Updates the offer document in the "point_offers" subcollection under the listing
+    7. Updates the corresponding offer in the user's "my_point_offers" subcollection
+    8. If it becomes the highest offer, updates the highestOfferPoints field in the listing document
+    9. Returns the updated listing
 
     Args:
         user_id: The ID of the user updating the offer
@@ -1010,16 +1056,22 @@ async def update_point_offer(
         my_point_offers_docs = await my_point_offers_query.get()
 
         my_offer_ref = None
+        my_offer_data = None
         for doc in my_point_offers_docs:
-            my_offer_data = doc.to_dict()
+            doc_data = doc.to_dict()
             # Check if this is the same offer by comparing offerreference
-            if my_offer_data.get("offerreference") == offer_id:
+            if doc_data.get("offerreference") == offer_id:
                 my_offer_ref = doc.reference
+                my_offer_data = doc_data
                 break
 
         if not my_offer_ref:
             logger.warning(f"Could not find corresponding my_offer for offer {offer_id} in user {user_id}'s my_point_offers collection")
             raise HTTPException(status_code=404, detail=f"Could not find corresponding my_offer for offer {offer_id}")
+
+        # 4. Check if the offer has been accepted
+        if my_offer_data and my_offer_data.get('status') == 'accepted':
+            raise HTTPException(status_code=400, detail="Cannot update an accepted offer")
 
         # 6. Update the offer data with the new amount
         now = datetime.now()
@@ -1119,11 +1171,12 @@ async def update_cash_offer(
     1. Verifies the user exists
     2. Verifies the listing exists
     3. Verifies the offer exists and belongs to the user
-    4. Verifies the new amount is higher than the current amount
-    5. Updates the offer document in the "cash_offers" subcollection under the listing
-    6. Updates the corresponding offer in the user's "my_cash_offers" subcollection
-    7. If it becomes the highest offer, updates the highestOfferCash field in the listing document
-    8. Returns the updated listing
+    4. Verifies the offer has not been accepted
+    5. Verifies the new amount is higher than the current amount
+    6. Updates the offer document in the "cash_offers" subcollection under the listing
+    7. Updates the corresponding offer in the user's "my_cash_offers" subcollection
+    8. If it becomes the highest offer, updates the highestOfferCash field in the listing document
+    9. Returns the updated listing
 
     Args:
         user_id: The ID of the user updating the offer
@@ -1176,16 +1229,22 @@ async def update_cash_offer(
         my_cash_offers_docs = await my_cash_offers_query.get()
 
         my_offer_ref = None
+        my_offer_data = None
         for doc in my_cash_offers_docs:
-            my_offer_data = doc.to_dict()
+            doc_data = doc.to_dict()
             # Check if this is the same offer by comparing offerreference
-            if my_offer_data.get("offerreference") == offer_id:
+            if doc_data.get("offerreference") == offer_id:
                 my_offer_ref = doc.reference
+                my_offer_data = doc_data
                 break
 
         if not my_offer_ref:
             logger.warning(f"Could not find corresponding my_offer for offer {offer_id} in user {user_id}'s my_cash_offers collection")
             raise HTTPException(status_code=404, detail=f"Could not find corresponding my_offer for offer {offer_id}")
+
+        # 4. Check if the offer has been accepted
+        if my_offer_data and my_offer_data.get('status') == 'accepted':
+            raise HTTPException(status_code=400, detail="Cannot update an accepted offer")
 
         # 6. Update the offer data with the new amount
         now = datetime.now()
@@ -1496,7 +1555,12 @@ async def offer_cash(
         if listing_data.get("status") == "accepted":
             raise HTTPException(status_code=400, detail="This listing already has an accepted offer")
 
-        # 5. Create a new offer document in the "cash_offers" subcollection
+        # 5. Check if the listing's priceCash is null or zero
+        price_cash = listing_data.get("priceCash")
+        if price_cash is None or price_cash == 0:
+            raise HTTPException(status_code=400, detail="This listing does not accept cash offers")
+
+        # 6. Create a new offer document in the "cash_offers" subcollection
         now = datetime.now()
         expires_at = now + timedelta(days=expired)  # Calculate expiration date
 
@@ -1668,11 +1732,13 @@ async def get_all_listings(
         sort_by: Optional[str] = None,
         sort_order: str = "desc",
         search_query: Optional[str] = None,
-        cursor: Optional[str] = None,
-        algolia_index=None
+        page: int = 1,
+        algolia_index=None,
+        filter_out_accepted: bool = True
 ) -> Any:
     try:
-        page = int(cursor) if cursor and cursor.isdigit() else 0
+        # Adjust page to be 0-indexed for Algolia
+        page_index = page - 1 if page > 0 else 0
 
         if algolia_index:
             client, index_name = algolia_index
@@ -1683,11 +1749,13 @@ async def get_all_listings(
         filters = []
         if collection_id:
             filters.append(f'collection_id:"{collection_id}"')
+        if filter_out_accepted:
+            filters.append('NOT status:accepted')
         filter_str = " AND ".join(filters) if filters else None
 
         search_params = {
             "hitsPerPage": per_page,
-            "page": page,
+            "page": page_index,
         }
         if filter_str:
             search_params["filters"] = filter_str
@@ -1738,22 +1806,23 @@ async def get_all_listings(
         pagination_info = PaginationInfo(
             total_items=res.nb_hits,
             items_per_page=per_page,
-            total_pages=res.nb_pages
+            total_pages=res.nb_pages,
+            current_page=page
         )
 
         filters_info = AppliedFilters(
             sort_by=sort_by or "",
             sort_order=sort_order,
             search_query=search_query,
-            collection_id=collection_id
+            collection_id=collection_id,
+            filter_out_accepted=filter_out_accepted
         )
 
         return PaginatedListingsResponse(
             id = hit_data["object_id"],
             listings=listings,
             pagination=pagination_info,
-            filters=filters_info,
-            next_cursor=str(page + 1) if (page + 1 < res.nb_pages) else None
+            filters=filters_info
         )
 
     except Exception as e:

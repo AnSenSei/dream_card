@@ -83,6 +83,7 @@ class AppliedFilters(BaseModel):
     sort_order: str = "desc"
     search_query: Optional[str] = None
     collection_id: Optional[str] = None
+    filter_out_accepted: bool = True
 
 class UserCardListResponse(BaseModel):
     """Response model for listing user cards by subcollection"""
@@ -252,6 +253,15 @@ class CardToWithdraw(BaseModel):
     card_id: str = Field(..., description="The ID of the card to withdraw")
     quantity: int = Field(1, gt=0, description="The quantity to withdraw (default: 1)")
     subcollection_name: str = Field(..., description="The name of the subcollection where the card is stored")
+
+class CardToDestroy(BaseModel):
+    """Model for a card to destroy"""
+    card_id: str = Field(..., description="The ID of the card to destroy")
+    quantity: int = Field(1, gt=0, description="The quantity to destroy (default: 1)")
+
+class DestroyCardsRequest(BaseModel):
+    """Request model for destroying multiple cards"""
+    cards: List[CardToDestroy] = Field(..., description="List of cards to destroy")
 
 class WithdrawCardsRequest(BaseModel):
     """Request model for withdrawing multiple cards"""

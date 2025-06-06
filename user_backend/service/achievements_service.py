@@ -7,6 +7,7 @@ from datetime import datetime
 
 from config import get_logger, settings
 from models.schemas import Achievement, UserAchievement, AchievementWithProgress, AchievementResponse, PaginationInfo
+from utils.gcs_utils import generate_signed_url
 
 logger = get_logger(__name__)
 
@@ -509,6 +510,355 @@ async def get_user_achievement_by_id(
     except Exception as e:
         logger.error(f"Error getting achievement {achievement_id} for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get achievement: {str(e)}")
+
+async def get_user_achievement_highlights(
+    user_id: str,
+    db_client: AsyncClient,
+    page: int = 1,
+    per_page: int = 10,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+    search_query: str | None = None
+) -> Tuple[List[AchievementWithProgress], PaginationInfo]:
+    """
+    Get all achievements in the user's achievement highlights subcollection with pagination.
+
+    Args:
+        user_id: The ID of the user to get achievement highlights for
+        db_client: Firestore client
+        page: The page number to get (default: 1)
+        per_page: The number of items per page (default: 10)
+        sort_by: The field to sort by (default: "created_at")
+        sort_order: The sort order ("asc" or "desc", default: "desc")
+        search_query: Optional search query to filter achievements by name
+
+    Returns:
+        A tuple containing:
+        - List of AchievementWithProgress objects
+        - PaginationInfo object
+
+    Raises:
+        HTTPException: If there's an error getting the achievement highlights
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the achievement highlights collection reference
+        highlights_ref = user_ref.collection('achievement_highlights')
+
+        # Create the base query
+        query = highlights_ref
+
+        # Apply search query if provided
+        if search_query and search_query.strip():
+            stripped_search_query = search_query.strip()
+            logger.info(f"Applying search filter for name: >='{stripped_search_query}' and <='{stripped_search_query}\uf8ff'")
+            query = query.where("name", ">=", stripped_search_query)
+            query = query.where("name", "<=", stripped_search_query + "\uf8ff")
+
+        # Count total items matching the query
+        count_agg_query = query.count()
+        count_snapshot = await count_agg_query.get()
+        total_items = count_snapshot[0][0].value if count_snapshot and count_snapshot[0] else 0
+
+        if total_items == 0:
+            logger.info(f"No achievement highlights found for user {user_id}")
+            return [], PaginationInfo(
+                total_items=0,
+                items_per_page=per_page,
+                current_page=page,
+                total_pages=0
+            )
+
+        # Determine sort direction
+        if sort_order.lower() == "desc":
+            direction = firestore.Query.DESCENDING
+        elif sort_order.lower() == "asc":
+            direction = firestore.Query.ASCENDING
+        else:
+            logger.warning(f"Invalid sort_order '{sort_order}'. Defaulting to DESCENDING.")
+            direction = firestore.Query.DESCENDING
+            sort_order = "desc"  # Ensure applied filter reflects actual sort
+
+        # Apply sorting
+        query_with_filters = query  # query already has search filters if any
+
+        if search_query and search_query.strip() and sort_by != "name":
+            # If searching and sorting by a different field, ensure name is the first sort key
+            logger.warning(f"Search query on 'name' is active while sorting by '{sort_by}'. Firestore requires ordering by 'name' first.")
+            query_with_sort = query_with_filters.order_by("name").order_by(sort_by, direction=direction)
+        else:
+            query_with_sort = query_with_filters.order_by(sort_by, direction=direction)
+
+        # Apply pagination
+        current_page_query = max(1, page)
+        per_page_query = max(1, per_page)
+        offset = (current_page_query - 1) * per_page_query
+
+        paginated_query = query_with_sort.limit(per_page_query).offset(offset)
+
+        # Execute the query
+        logger.info(f"Executing Firestore query for user {user_id} achievement highlights with pagination and sorting")
+        stream = paginated_query.stream()
+
+        # Process the results
+        achievements_list = []
+        async for doc in stream:
+            try:
+                achievement_data = doc.to_dict()
+                if not achievement_data:  # Skip empty documents
+                    logger.warning(f"Skipping empty document with ID: {doc.id} in achievement highlights")
+                    continue
+
+                # Ensure ID is part of the data
+                if 'id' not in achievement_data:
+                    achievement_data['id'] = doc.id
+
+                # Generate signed URL for the achievement image if it exists
+                if 'image_url' in achievement_data and achievement_data['image_url']:
+                    try:
+                        achievement_data['image_url'] = await generate_signed_url(achievement_data['image_url'])
+                    except Exception as sign_error:
+                        logger.error(f"Failed to generate signed URL for {achievement_data['image_url']}: {sign_error}")
+                        # Keep the original URL if signing fails
+
+                # Create an AchievementWithProgress object
+                achievement = AchievementWithProgress(
+                    id=achievement_data.get('id'),
+                    name=achievement_data.get('name'),
+                    description=achievement_data.get('description'),
+                    image_url=achievement_data.get('image_url'),
+                    criteria=achievement_data.get('criteria'),
+                    created_at=achievement_data.get('created_at'),
+                    updated_at=achievement_data.get('updated_at'),
+                    emblemId=achievement_data.get('emblemId'),
+                    emblemUrl=achievement_data.get('emblemUrl'),
+                    condition=achievement_data.get('condition'),
+                    reward=achievement_data.get('reward'),
+                    awardedAt=achievement_data.get('awardedAt'),
+                    progress=achievement_data.get('progress'),
+                    achieved=achievement_data.get('achieved', False)
+                )
+
+                achievements_list.append(achievement)
+            except Exception as e:
+                logger.error(f"Error processing achievement highlight document {doc.id}: {e}", exc_info=True)
+                # Continue processing other documents
+
+        # Calculate total pages
+        total_pages = math.ceil(total_items / per_page_query) if total_items > 0 else 0
+
+        # Create pagination info
+        pagination = PaginationInfo(
+            total_items=total_items,
+            items_per_page=per_page_query,
+            current_page=current_page_query,
+            total_pages=total_pages
+        )
+
+        logger.info(f"Retrieved {len(achievements_list)} achievement highlights for user {user_id} (page {current_page_query} of {total_pages})")
+
+        return achievements_list, pagination
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting achievement highlights for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get achievement highlights: {str(e)}")
+
+
+async def delete_achievement_from_highlights(
+    user_id: str,
+    achievement_id: str,
+    db_client: AsyncClient
+) -> dict:
+    """
+    Delete an achievement from the user's achievement highlights subcollection.
+
+    Args:
+        user_id: The ID of the user who owns the achievement
+        achievement_id: The ID of the achievement to delete from highlights
+        db_client: Firestore client
+
+    Returns:
+        A dictionary with a success message
+
+    Raises:
+        HTTPException: If there's an error deleting the achievement from highlights
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Set up the achievement highlights reference
+        highlights_ref = user_ref.collection('achievement_highlights').document(achievement_id)
+
+        # Check if the achievement exists in highlights
+        highlights_doc = await highlights_ref.get()
+
+        if not highlights_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Achievement with ID {achievement_id} not found in highlights")
+
+        # Get the achievement data before deleting it (for logging or returning)
+        highlights_data = highlights_doc.to_dict()
+
+        # Delete the achievement from highlights
+        await highlights_ref.delete()
+
+        logger.info(f"Deleted achievement {achievement_id} from highlights for user {user_id}")
+
+        # Return a success message
+        return {"message": f"Achievement {achievement_id} successfully deleted from highlights for user {user_id}"}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deleting achievement {achievement_id} from highlights for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete achievement from highlights: {str(e)}")
+
+
+async def add_achievement_to_highlights(
+    user_id: str,
+    achievement_id: str,
+    db_client: AsyncClient
+) -> AchievementWithProgress:
+    """
+    Add an achievement to the user's achievement highlights subcollection.
+    This function finds the achievement in the user's achievements and adds it to the achievement highlights subcollection.
+
+    Args:
+        user_id: The ID of the user who owns the achievement
+        achievement_id: The ID of the achievement to add to highlights
+        db_client: Firestore client
+
+    Returns:
+        The achievement that was added to highlights as an AchievementWithProgress object
+
+    Raises:
+        HTTPException: If there's an error adding the achievement to highlights
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the achievement details from the achievements collection
+        achievement_ref = db_client.collection('achievements').document(achievement_id)
+        achievement_doc = await achievement_ref.get()
+
+        if not achievement_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Achievement with ID {achievement_id} not found")
+
+        # Get the achievement data
+        achievement_data = achievement_doc.to_dict()
+
+        # Check if the user has this achievement
+        user_achievement_ref = user_ref.collection('achievements').document(achievement_id)
+        user_achievement_doc = await user_achievement_ref.get()
+
+        if not user_achievement_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User {user_id} has not acquired achievement {achievement_id}")
+
+        # Get the user achievement data
+        user_achievement_data = user_achievement_doc.to_dict()
+
+        # Set up the achievement highlights subcollection reference
+        highlights_ref = user_ref.collection('achievement_highlights').document(achievement_id)
+
+        # Check if the achievement already exists in highlights
+        highlights_doc = await highlights_ref.get()
+
+        if highlights_doc.exists:
+            # Achievement already exists in highlights, just return it
+            highlights_data = highlights_doc.to_dict()
+
+            # Generate signed URL for the achievement image if it exists
+            if 'image_url' in highlights_data and highlights_data['image_url']:
+                try:
+                    highlights_data['image_url'] = await generate_signed_url(highlights_data['image_url'])
+                except Exception as sign_error:
+                    logger.error(f"Failed to generate signed URL for {highlights_data['image_url']}: {sign_error}")
+                    # Keep the original URL if signing fails
+
+            # Create an AchievementWithProgress object
+            achievement_with_progress = AchievementWithProgress(
+                id=highlights_data.get('id'),
+                name=highlights_data.get('name'),
+                description=highlights_data.get('description'),
+                image_url=highlights_data.get('image_url'),
+                criteria=highlights_data.get('criteria'),
+                created_at=highlights_data.get('created_at'),
+                updated_at=highlights_data.get('updated_at'),
+                emblemId=highlights_data.get('emblemId'),
+                emblemUrl=highlights_data.get('emblemUrl'),
+                condition=highlights_data.get('condition'),
+                reward=highlights_data.get('reward'),
+                awardedAt=user_achievement_data.get('acquired_at'),
+                progress=user_achievement_data.get('progress'),
+                achieved=user_achievement_data.get('acquired', False)
+            )
+
+            return achievement_with_progress
+
+        # Combine achievement data with user achievement data
+        combined_data = {
+            **achievement_data,
+            'awardedAt': user_achievement_data.get('acquired_at'),
+            'progress': user_achievement_data.get('progress'),
+            'achieved': user_achievement_data.get('acquired', False)
+        }
+
+        # Add the achievement to the highlights subcollection
+        await highlights_ref.set(combined_data)
+
+        logger.info(f"Added achievement {achievement_id} to highlights for user {user_id}")
+
+        # Generate signed URL for the achievement image if it exists
+        if 'image_url' in achievement_data and achievement_data['image_url']:
+            try:
+                achievement_data['image_url'] = await generate_signed_url(achievement_data['image_url'])
+            except Exception as sign_error:
+                logger.error(f"Failed to generate signed URL for {achievement_data['image_url']}: {sign_error}")
+                # Keep the original URL if signing fails
+
+        # Create an AchievementWithProgress object
+        achievement_with_progress = AchievementWithProgress(
+            id=achievement_data.get('id'),
+            name=achievement_data.get('name'),
+            description=achievement_data.get('description'),
+            image_url=achievement_data.get('image_url'),
+            criteria=achievement_data.get('criteria'),
+            created_at=achievement_data.get('created_at'),
+            updated_at=achievement_data.get('updated_at'),
+            emblemId=achievement_data.get('emblemId'),
+            emblemUrl=achievement_data.get('emblemUrl'),
+            condition=achievement_data.get('condition'),
+            reward=achievement_data.get('reward'),
+            awardedAt=user_achievement_data.get('acquired_at'),
+            progress=user_achievement_data.get('progress'),
+            achieved=user_achievement_data.get('acquired', False)
+        )
+
+        return achievement_with_progress
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error adding achievement {achievement_id} to highlights for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to add achievement to highlights: {str(e)}")
+
 
 async def calculate_and_update_level(user_id: str, db_client: AsyncClient) -> Dict[str, Any]:
     """

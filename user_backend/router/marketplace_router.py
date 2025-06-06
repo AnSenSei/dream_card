@@ -454,7 +454,8 @@ async def get_all_listings_route(
     sort_by: Optional[str] = Query(None, description="Sort by field (priceCash or pricePoints)"),
     sort_order: str = Query("desc", description="Sort direction (asc or desc)"),
     search_query: Optional[str] = Query(None, description="Search by card name"),
-    cursor: Optional[str] = Query(None, description="Cursor for pagination (ID of the last document in the previous page)"),
+    page: int = Query(1, ge=1, description="Page number for pagination"),
+    filter_out_accepted: bool = Query(True, description="Filter out listings with status 'accepted'"),
     db: firestore.AsyncClient = Depends(get_firestore_client),
     algolia_index = Depends(get_algolia_index)
 ):
@@ -465,8 +466,8 @@ async def get_all_listings_route(
     1. Retrieves listings from the marketplace with optional filtering by collection_id
     2. Filters listings by card_name if search_query is provided
     3. Applies sorting by priceCash or pricePoints if specified
-    4. Applies cursor-based pagination
-    5. Returns a paginated list of listings with pagination info, applied filters, and a cursor for the next page
+    4. Applies page-based pagination
+    5. Returns a paginated list of listings with pagination info and applied filters
 
     Args:
         collection_id: Optional filter by collection ID
@@ -474,7 +475,8 @@ async def get_all_listings_route(
         sort_by: Field to sort by (priceCash or pricePoints)
         sort_order: Sort direction (asc or desc)
         search_query: Optional search query to filter listings by card name
-        cursor: Cursor for pagination (ID of the last document in the previous page)
+        page: Page number for pagination (starts at 1)
+        filter_out_accepted: Whether to filter out listings with status 'accepted' (default: True)
     """
     try:
         result = await get_all_listings(
@@ -484,8 +486,9 @@ async def get_all_listings_route(
             sort_by=sort_by,
             sort_order=sort_order,
             search_query=search_query,
-            cursor=cursor,
-            algolia_index=algolia_index  # Pass the Algolia index
+            page=page,
+            algolia_index=algolia_index,  # Pass the Algolia index
+            filter_out_accepted=filter_out_accepted  # Pass the filter_out_accepted parameter
         )
         return result
     except HTTPException:

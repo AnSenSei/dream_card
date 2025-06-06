@@ -8,7 +8,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from config import get_logger, instrument_app, settings, test_connection, close_connector
 from router import account_router, card_router, marketplace_router, rank_router, payment_router
-from router.achievements_router import router as achievements_router, users_router
+from router.achievements_router import router as achievements_router
 from router.marketplace_router import listings_router
 from service.payment_service import ensure_payment_tables_exist
 
@@ -109,8 +109,6 @@ logger.info("Payment router included in the sub-API.")
 api_v1.include_router(achievements_router)
 logger.info("Achievements router included in the sub-API.")
 
-api_v1.include_router(users_router)
-logger.info("Users achievements router included in the sub-API.")
 
 # Mount the sub-API (api_v1) under the main app (app)
 app.mount(f"/{SERVICE_PATH}/api/{API_VERSION}", api_v1)

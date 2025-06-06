@@ -13,4 +13,3 @@ class PaginatedListingsResponse(BaseModel):
     listings: List[CardListing]
     pagination: PaginationInfo
     filters: AppliedFilters
-    next_cursor: Optional[str] = None  # Cursor for the next page

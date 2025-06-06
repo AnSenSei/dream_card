@@ -1028,9 +1028,10 @@ async def add_card_to_user(
             })
 
         if existing_deep.exists:
-            # Increment quantity and refresh buyback timestamp
+            # Increment quantity, update point_worth, and refresh buyback timestamp
             tx.update(deep_ref, {
                 "quantity": firestore.Increment(1),
+                "point_worth": user_card_data["point_worth"],
                 "buybackexpiresAt": now + timedelta(days=settings.card_buyback_expire_days)
             })
             if user_card_data["expireAt"]:
@@ -1235,6 +1236,177 @@ async def add_cards_and_deduct_points(
 
 
 
+
+async def destroy_multiple_cards(
+    user_id: str,
+    cards_to_destroy: List[Dict[str, Any]],
+    db_client: AsyncClient
+) -> Dict[str, Any]:
+    """
+    Destroy multiple cards from a user's collection and add their point_worth to the user's pointsBalance.
+    For each card, if quantity is less than the card's quantity, only reduce the quantity.
+    Only remove a card if the remaining quantity is 0.
+    Also checks if the cards exist in expiring_cards collection and updates them accordingly.
+
+    Args:
+        user_id: The ID of the user who owns the cards
+        cards_to_destroy: List of dictionaries containing card_id, quantity, and subcollection_name for each card to destroy
+        db_client: Firestore client
+
+    Returns:
+        Dictionary containing information about the destroyed cards and updated user balance
+
+    Raises:
+        HTTPException: If there's an error destroying the cards
+    """
+    try:
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Validate cards to destroy
+        if not cards_to_destroy:
+            raise HTTPException(status_code=400, detail="No cards specified for destruction")
+
+        # Prepare data for transaction
+        cards_data = []
+        total_points_to_add = 0
+
+        for card_info in cards_to_destroy:
+            card_id = card_info.get('card_id')
+            quantity = card_info.get('quantity', 1)
+            subcollection_name = card_info.get('subcollection_name')
+
+            if not card_id:
+                raise HTTPException(status_code=400, detail="Card ID is required for each card")
+
+            if not subcollection_name:
+                # Get all subcollections under the 'cards' document
+                cards_doc_ref = user_ref.collection('cards').document('cards')
+                collections = []
+                async for collection in cards_doc_ref.collections():
+                    collections.append(collection)
+
+                # If there are no subcollections, raise an error
+                if not collections:
+                    raise HTTPException(404, f"No card collections found for user {user_id}")
+
+                # Use the first subcollection as the default
+                subcollection_name = collections[0].id
+                logger.info(f"Using default subcollection {subcollection_name} for card {card_id} for user {user_id}")
+
+            if quantity <= 0:
+                raise HTTPException(status_code=400, detail=f"Quantity must be greater than 0 for card {card_id}")
+
+            # Get the card from the subcollection
+            card_ref = user_ref.collection('cards').document('cards').collection(subcollection_name).document(card_id)
+            card_doc = await card_ref.get()
+
+            if not card_doc.exists:
+                raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found in subcollection {subcollection_name}")
+
+            card_data = card_doc.to_dict()
+            card = UserCard(**card_data)
+            card_quantity = card.quantity
+
+            if quantity > card_quantity:
+                raise HTTPException(status_code=400, detail=f"Cannot destroy {quantity} of card {card_id}, only {card_quantity} available")
+
+            # Calculate points to add and remaining quantity
+            points_to_add = card.point_worth * quantity
+            total_points_to_add += points_to_add
+            remaining = card_quantity - quantity
+
+            # Pre-fetch main card exists flag
+            collection_meta_data = await get_collection_metadata_from_service(subcollection_name)
+            main_card_ref = db_client.collection(collection_meta_data["firestoreCollection"]).document(card_id)
+            main_card_doc = await main_card_ref.get()
+
+            # Check if card exists in expiring_cards collection
+            expiring_card_ref = None
+            expiring_card_exists = False
+            if card.point_worth < 1000:
+                expiring_cards_collection = db_client.collection('expiring_cards')
+                expiring_card_ref = expiring_cards_collection.document(f"{user_id}_{card_id}")
+                expiring_card_doc = await expiring_card_ref.get()
+                expiring_card_exists = expiring_card_doc.exists
+
+            # Add card data to the list
+            cards_data.append({
+                'card_id': card_id,
+                'quantity': quantity,
+                'subcollection_name': subcollection_name,
+                'card_ref': card_ref,
+                'card_data': card_data,
+                'remaining': remaining,
+                'points_to_add': points_to_add,
+                'main_card_ref': main_card_ref,
+                'main_card_doc': main_card_doc,
+                'expiring_card_ref': expiring_card_ref,
+                'expiring_card_exists': expiring_card_exists
+            })
+
+        # Create transaction to process all cards
+        @firestore.async_transactional
+        async def destroy_cards_transaction(transaction):
+            # Add points to user balance
+            transaction.update(user_ref, {"pointsBalance": firestore.Increment(total_points_to_add)})
+
+            # Process each card
+            for card_data in cards_data:
+                card_ref = card_data['card_ref']
+                remaining = card_data['remaining']
+                main_card_ref = card_data['main_card_ref']
+                main_card_doc = card_data['main_card_doc']
+                expiring_card_ref = card_data['expiring_card_ref']
+                expiring_card_exists = card_data['expiring_card_exists']
+                quantity = card_data['quantity']
+
+                if remaining <= 0:
+                    # Delete the card if no quantity remains
+                    transaction.delete(card_ref)
+                else:
+                    # Update the card quantity
+                    transaction.update(card_ref, {"quantity": remaining})
+
+                    # Update main card if it exists
+                    if main_card_doc.exists:
+                        main_card = main_card_doc.to_dict()
+                        main_remaining = main_card["quantity"] + quantity
+                        transaction.update(main_card_ref, {"quantity": main_remaining})
+
+                # Update expiring_cards collection if needed
+                if expiring_card_exists:
+                    if remaining <= 0:
+                        transaction.delete(expiring_card_ref)
+                    else:
+                        transaction.update(expiring_card_ref, {
+                            "quantity": firestore.Increment(-quantity)
+                        })
+
+        # Execute the transaction
+        txn = db_client.transaction()
+        await destroy_cards_transaction(txn)
+
+        # Fetch the updated user model
+        updated_user_snap = await user_ref.get()
+        updated_user = User(**updated_user_snap.to_dict())
+
+        # Return information about the destroyed cards and updated user balance
+        return {
+            "message": f"Successfully destroyed {len(cards_data)} card(s) and added {total_points_to_add} points",
+            "cards_destroyed": len(cards_data),
+            "points_added": total_points_to_add,
+            "remaining_points": updated_user.pointsBalance
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error destroying multiple cards for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to destroy cards: {str(e)}")
 
 async def destroy_card(
     user_id: str,

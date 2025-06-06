@@ -5,13 +5,15 @@ from pydantic import BaseModel
 
 from models.schemas import (UserCard, UserCardsResponse, UserCardListResponse, DrawnCard, CardReferencesRequest, PerformFusionRequest,
                             PerformFusionResponse, RandomFusionRequest, CheckCardMissingRequest, CheckCardMissingResponse, WithdrawCardsRequest, WithdrawCardsResponse,
-                            WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse, WithdrawRequestsResponse, UpdateWithdrawCardsRequest)
+                            WithdrawRequest, WithdrawRequestDetail, PackOpeningHistoryResponse, WithdrawRequestsResponse, UpdateWithdrawCardsRequest,
+                            DestroyCardsRequest)
 from service.card_service import (
     add_multiple_cards_to_user,
     draw_card_from_pack,
     draw_multiple_cards_from_pack,
     get_user_cards,
     destroy_card,
+    destroy_multiple_cards,
     withdraw_ship_card,
     withdraw_ship_multiple_cards,
     perform_fusion,
@@ -256,6 +258,8 @@ async def destroy_card_route(
     1. Takes a user ID, card ID, and subcollection name as arguments
     2. Deletes the card from the user's collection
     3. Returns a success message
+
+    Note: For destroying multiple cards at once, use the POST /users/{user_id}/cards/destroy endpoint.
     """
     try:
         result = await destroy_card(
@@ -271,6 +275,41 @@ async def destroy_card_route(
     except Exception as e:
         logger.error(f"Error destroying card for user: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while destroying the card")
+
+@router.delete("/{user_id}/batch-destroy-cards", response_model=dict)
+async def destroy_multiple_cards_route(
+    user_id: str = Path(..., description="The ID of the user who owns the cards"),
+    destroy_request: DestroyCardsRequest = Body(..., description="The cards to destroy"),
+    subcollection_name: str = Query(..., description="The name of the subcollection where all cards are stored"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Destroy multiple cards from a user's collection.
+
+    This endpoint:
+    1. Takes a user ID and a list of cards to destroy (each with card_id and quantity)
+    2. Takes a subcollection_name parameter that applies to all cards
+    3. Destroys the specified quantity of each card
+    4. Adds the point_worth of each destroyed card to the user's pointsBalance
+    5. For each card, if quantity is less than the card's quantity, only destroys the specified quantity
+    6. Only removes a card from the collection if the remaining quantity is 0
+    7. Returns information about the destroyed cards and updated user balance
+    """
+    try:
+        # Convert the CardToDestroy objects to dictionaries and add the subcollection_name to each
+        cards_to_destroy = [{"card_id": card.card_id, "quantity": card.quantity, "subcollection_name":subcollection_name} for card in destroy_request.cards]
+
+        result = await destroy_multiple_cards(
+            user_id=user_id,
+            cards_to_destroy=cards_to_destroy,
+            db_client=db
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error destroying multiple cards for user: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while destroying the cards")
 
 @router.post("/{user_id}/cards/withdraw", response_model=WithdrawCardsResponse)
 async def withdraw_multiple_cards_route(
