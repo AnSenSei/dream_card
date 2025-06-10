@@ -1153,6 +1153,60 @@ async def get_all_official_listings(collection_id: str) -> List[dict]:
         logger.error(f"Error retrieving cards from official listing for collection {collection_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Could not retrieve cards from official listing: {str(e)}")
 
+async def update_official_listing(collection_id: str, card_id: str, pricePoints: int, priceCash: int) -> dict:
+    """
+    Updates a card in the official_listing collection.
+    This function updates the pricePoints and priceCash of a card in the official marketplace.
+
+    Args:
+        collection_id: The ID of the collection the card belongs to
+        card_id: The ID of the card to update in the official listing
+        pricePoints: The new price in points for the card in the official listing
+        priceCash: The new price in cash for the card in the official listing
+
+    Returns:
+        dict: The updated card data
+
+    Raises:
+        HTTPException: 404 if card not found, 500 for other errors
+    """
+    firestore_client = get_firestore_client()
+
+    try:
+        # Get a reference to the card in the official_listing collection
+        official_listing_ref = firestore_client.collection("official_listing").document(collection_id).collection("cards").document(card_id)
+
+        # Get the current card data from the official_listing collection
+        official_listing_doc = await official_listing_ref.get()
+        if not official_listing_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Card with ID {card_id} not found in official listing for collection {collection_id}")
+
+        official_listing_data = official_listing_doc.to_dict()
+
+        # Update the card in the official_listing collection
+        await official_listing_ref.update({
+            'pricePoints': pricePoints,
+            'priceCash': priceCash
+        })
+
+        logger.info(f"Updated card {card_id} from collection {collection_id} in official listing: set pricePoints to {pricePoints}, priceCash to {priceCash}")
+
+        # Return the updated official_listing_data
+        official_listing_data['pricePoints'] = pricePoints
+        official_listing_data['priceCash'] = priceCash
+
+        # Ensure collection_id is in the returned data
+        if 'collection_id' not in official_listing_data:
+            official_listing_data['collection_id'] = collection_id
+
+        return official_listing_data
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating card {card_id} from collection {collection_id} in official listing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not update card in official listing: {str(e)}")
+
 async def withdraw_from_official_listing(collection_id: str, card_id: str, quantity: int = 1) -> dict:
     """
     Withdraws a card from the official_listing collection.

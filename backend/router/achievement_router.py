@@ -3,7 +3,7 @@ from google.cloud import firestore
 from typing import Optional
 
 from models.achievement_schemas import AchievementCreate, AchievementResponse, AchievementCreateForm, UploadAchievementSchema, PaginatedAchievementResponse
-from service.achievement_service import upload_achievement_json, get_achievements
+from service.achievement_service import upload_achievement_json, get_achievements, update_achievement, delete_achievement
 from config import get_firestore_client, get_logger
 
 logger = get_logger(__name__)
@@ -64,5 +64,49 @@ async def list_achievements(
 
     # Call the service function to get the achievements
     result = await get_achievements(page, size, condition_type, sort_by, sort_direction)
+
+    return result
+
+
+@router.put("/{achievement_id}", response_model=AchievementResponse)
+async def update_achievement_endpoint(
+    achievement_id: str = Path(..., description="The ID of the achievement to update"),
+    update_data: dict = Body(..., description="The fields to update")
+) -> AchievementResponse:
+    """
+    Update an achievement by ID.
+
+    Args:
+        achievement_id: The ID of the achievement to update
+        update_data: Dictionary containing the fields to update
+
+    Returns:
+        AchievementResponse: The updated achievement
+    """
+    logger.info(f"Updating achievement {achievement_id} with data: {update_data}")
+
+    # Call the service function to update the achievement
+    result = await update_achievement(achievement_id, update_data)
+
+    return result
+
+
+@router.delete("/{achievement_id}")
+async def delete_achievement_endpoint(
+    achievement_id: str = Path(..., description="The ID of the achievement to delete")
+):
+    """
+    Delete an achievement by ID.
+
+    Args:
+        achievement_id: The ID of the achievement to delete
+
+    Returns:
+        dict: Success message
+    """
+    logger.info(f"Deleting achievement {achievement_id}")
+
+    # Call the service function to delete the achievement
+    result = await delete_achievement(achievement_id)
 
     return result

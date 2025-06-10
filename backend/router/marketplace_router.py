@@ -3,7 +3,7 @@ from google.cloud import firestore
 import httpx
 from typing import Dict, Any, Optional
 
-from service.storage_service import add_to_official_listing, withdraw_from_official_listing, get_all_official_listings
+from service.storage_service import add_to_official_listing, withdraw_from_official_listing, get_all_official_listings, update_official_listing
 from service.marketplace_service import buy_card_from_official_listing, get_official_listings_with_filters
 from config import get_logger, get_firestore_client, settings
 
@@ -231,6 +231,36 @@ async def withdraw_official_listing_endpoint(
         raise e
     except Exception as e:
         logger.error(f"Error in withdraw_official_listing_endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+@router.put("/official_listing")
+async def update_official_listing_endpoint(
+    collection_id: str = Query(..., description="Collection ID the card belongs to"),
+    card_id: str = Query(..., description="Card ID to update in the official listing"),
+    pricePoints: int = Query(..., description="New price in points for the card in the official listing"),
+    priceCash: int = Query(0, description="New price in cash for the card in the official listing")
+):
+    """
+    Updates a card in the official_listing collection.
+    This endpoint updates the pricePoints and priceCash of a card in the official marketplace.
+
+    Parameters:
+    - collection_id: The ID of the collection the card belongs to
+    - card_id: The ID of the card to update in the official listing
+    - pricePoints: The new price in points for the card in the official listing
+    - priceCash: The new price in cash for the card in the official listing
+    """
+    try:
+        result = await update_official_listing(collection_id, card_id, pricePoints, priceCash)
+        return {
+            "status": "success",
+            "message": f"Card {card_id} from collection {collection_id} updated in official listing with pricePoints {pricePoints} and priceCash {priceCash}",
+            "data": result
+        }
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error in update_official_listing_endpoint: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
 @router.post("/buy_out/{user_id}")

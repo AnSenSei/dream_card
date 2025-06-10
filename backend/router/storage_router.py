@@ -1,7 +1,8 @@
-from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Query, Body
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Query, Body, Depends
 from typing import Annotated, List
 
 from models.schemas import StoredCardInfo, UpdateQuantityRequest, UpdateCardRequest, CardListResponse, CollectionMetadata
+from models.fusion_schema import CardFusionsResponse
 from service.storage_service import (
     process_new_card_submission,
     get_all_stored_cards,
@@ -12,9 +13,10 @@ from service.storage_service import (
     get_collection_metadata,
     get_all_collection_metadata,
     get_card_by_id,
-
 )
-from config import get_logger
+from service.fusion_service import get_card_fusions
+from config import get_logger, get_firestore_client
+from google.cloud import firestore
 
 logger = get_logger(__name__)
 
@@ -142,6 +144,31 @@ async def get_card_by_id_endpoint(
     except Exception as e:
         logger.error(f"Unexpected error in get_card_by_id_endpoint for {document_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred retrieving card: {str(e)}")
+
+@router.get("/card/{collection_id}/{card_id}/fusions", response_model=CardFusionsResponse)
+async def get_card_fusions_route(
+    collection_id: str,
+    card_id: str,
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Retrieves information about what fusions a card is used in.
+
+    Args:
+        collection_id: The ID of the collection the card belongs to
+        card_id: The ID of the card
+        db: Firestore client dependency
+
+    Returns:
+        CardFusionsResponse: Information about the fusions the card is used in
+    """
+    try:
+        return await get_card_fusions(collection_id, card_id, db)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Unhandled error in get_card_fusions_route: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An internal error occurred while retrieving fusion information for card '{card_id}' in collection '{collection_id}'.")
 
 
 @router.patch("/cards/{document_id}/quantity", response_model=StoredCardInfo)

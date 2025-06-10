@@ -135,6 +135,122 @@ async def upload_achievement_json(achievement_data: UploadAchievementSchema) -> 
         raise HTTPException(status_code=500, detail=f"Failed to process achievement: {str(e)}")
 
 
+async def update_achievement(
+    achievement_id: str,
+    update_data: Dict[str, Any]
+) -> AchievementResponse:
+    """
+    Update an achievement by ID.
+
+    Args:
+        achievement_id: The ID of the achievement to update
+        update_data: Dictionary containing the fields to update
+
+    Returns:
+        AchievementResponse: The updated achievement
+
+    Raises:
+        HTTPException: If the achievement is not found or there's an error updating it
+    """
+    try:
+        # Get Firestore client
+        firestore_client = get_firestore_client()
+
+        # Get a reference to the achievement document
+        achievement_ref = firestore_client.collection("achievements").document(achievement_id)
+
+        # Check if the achievement exists
+        achievement_doc = await achievement_ref.get()
+        if not achievement_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Achievement with ID {achievement_id} not found")
+
+        # Get the current achievement data
+        achievement_data = achievement_doc.to_dict()
+
+        # Update the achievement document
+        # Only update the fields that are provided in update_data
+        update_fields = {}
+        if "name" in update_data:
+            update_fields["name"] = update_data["name"]
+        if "description" in update_data:
+            update_fields["description"] = update_data["description"]
+        if "condition" in update_data:
+            update_fields["condition"] = update_data["condition"]
+        if "reward" in update_data:
+            update_fields["reward"] = update_data["reward"]
+        if "rarity" in update_data:
+            update_fields["rarity"] = update_data["rarity"]
+        if "rank" in update_data:
+            update_fields["rank"] = update_data["rank"]
+
+        # Add updated_at timestamp
+        update_fields["updated_at"] = firestore.SERVER_TIMESTAMP
+
+        # Update the document
+        await achievement_ref.update(update_fields)
+
+        # Get the updated achievement data
+        updated_doc = await achievement_ref.get()
+        updated_data = updated_doc.to_dict()
+
+        # Create response
+        response = AchievementResponse(
+            id=updated_data.get("id"),
+            name=updated_data.get("name"),
+            description=updated_data.get("description"),
+            condition=updated_data.get("condition"),
+            reward=updated_data.get("reward"),
+            rarity=updated_data.get("rarity"),
+            rank=updated_data.get("rank")
+        )
+
+        return response
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating achievement {achievement_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update achievement: {str(e)}")
+
+async def delete_achievement(achievement_id: str) -> Dict[str, Any]:
+    """
+    Delete an achievement by ID.
+
+    Args:
+        achievement_id: The ID of the achievement to delete
+
+    Returns:
+        Dict[str, Any]: Success message
+
+    Raises:
+        HTTPException: If the achievement is not found or there's an error deleting it
+    """
+    try:
+        # Get Firestore client
+        firestore_client = get_firestore_client()
+
+        # Get a reference to the achievement document
+        achievement_ref = firestore_client.collection("achievements").document(achievement_id)
+
+        # Check if the achievement exists
+        achievement_doc = await achievement_ref.get()
+        if not achievement_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Achievement with ID {achievement_id} not found")
+
+        # Delete the achievement document
+        await achievement_ref.delete()
+
+        return {
+            "status": "success",
+            "message": f"Achievement with ID {achievement_id} deleted successfully"
+        }
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deleting achievement {achievement_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete achievement: {str(e)}")
+
 async def get_achievements(
     page: int, 
     size: int, 
