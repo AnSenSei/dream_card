@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, Form, File, UploadFile, Body, Query
+from fastapi import APIRouter, HTTPException, Depends, Form, Body, Query
 from typing import List, Dict, Optional, Any
 import json
 from models.pack_schema import (
@@ -23,9 +23,11 @@ from service.packs_service import (
     add_card_direct_to_pack,
     delete_card_from_pack,
     activate_pack_in_firestore,
+    inactivate_pack_in_firestore,
     delete_pack_in_firestore,
     get_all_cards_in_pack,
-    get_inactive_packs_from_collection
+    get_inactive_packs_from_collection,
+    get_inactive_packs_from_collection_paginated
 )
 from config import get_firestore_client, get_storage_client, settings, get_logger
 from google.cloud import firestore, storage
@@ -96,24 +98,56 @@ async def get_packs_in_collection_route(
         next_cursor=result["next_cursor"]
     )
 
-@router.get("/collection/{collection_id}/inactive", response_model=List[CardPack])
+@router.get("/collection/{collection_id}/inactive", response_model=PaginatedPacksResponse)
 async def get_inactive_packs_in_collection_route(
     collection_id: str,
+    page: int = Query(1, description="Page number (default: 1)"),
+    per_page: int = Query(10, description="Items per page (default: 10)"),
+    sort_by: Optional[str] = Query("popularity", description="Field to sort by (default: popularity)"),
+    sort_order: str = Query("desc", description="Sort order (asc or desc, default: desc)"),
+    search_query: Optional[str] = Query(None, description="Optional search query to filter packs by name"),
+    search_by_cards: bool = Query(False, description="Whether to search by cards in pack (default: False)"),
+    cursor: Optional[str] = Query(None, description="Cursor for pagination (ID of the last document in the previous page)"),
     db: firestore.AsyncClient = Depends(get_firestore_client)
 ):
     """
-    Lists all inactive packs (where is_active == False) under a specific collection in Firestore.
+    Lists inactive packs (where is_active == False) under a specific collection in Firestore with pagination, filtering, sorting, and searching.
 
     Args:
         collection_id: The ID of the collection to get inactive packs from
+        page: Page number (default: 1)
+        per_page: Items per page (default: 10)
+        sort_by: Field to sort by (default: "popularity")
+        sort_order: Sort order (asc or desc, default: desc)
+        search_query: Optional search query to filter packs by name
+        search_by_cards: Whether to search by cards in pack (default: False)
+        cursor: Optional cursor for pagination (ID of the last document in the previous page)
         db: Firestore client dependency
 
     Returns:
-        List of inactive CardPack objects in the collection
+        PaginatedPacksResponse containing:
+            - packs: List of inactive packs in the collection
+            - pagination: Pagination information
+            - filters: Applied filters
+            - next_cursor: Cursor for the next page
     """
-    return await get_inactive_packs_from_collection(
+    result = await get_inactive_packs_from_collection_paginated(
         collection_id=collection_id,
-        db_client=db
+        db_client=db,
+        page=page,
+        per_page=per_page,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        search_query=search_query,
+        search_by_cards=search_by_cards,
+        cursor=cursor
+    )
+
+    return PaginatedPacksResponse(
+        packs=result["packs"],
+        pagination=result["pagination"],
+        filters=result["filters"],
+        next_cursor=result["next_cursor"]
     )
 
 @router.get("/{pack_id}", response_model=CardPack)
@@ -142,7 +176,7 @@ async def add_pack_route(
     popularity: Optional[int] = Form(None),
     db: firestore.AsyncClient = Depends(get_firestore_client),
     storage_client: storage.Client = Depends(get_storage_client),
-    image_file: Optional[UploadFile] = File(None)
+    image_file: Optional[str] = Form(None)  # Changed to accept base64 encoded image string
 ):
     """
     Adds a new card pack to Firestore, optionally including an image.
@@ -154,7 +188,7 @@ async def add_pack_route(
     - **win_rate**: Optional win rate for the pack (sent as form field).
     - **max_win**: Optional maximum win value for the pack (sent as form field).
     - **popularity**: Optional popularity value for the pack (sent as form field). Defaults to 0 if not provided.
-    - **image_file**: Optional image file for the pack.
+    - **image_file**: Optional base64 encoded image string for the pack (format: "data:image/jpeg;base64,...").
     """
     try:
         pack_request_model = AddPackRequest(
@@ -329,6 +363,44 @@ async def activate_pack_route(
     except Exception as e:
         logger.error(f"Unhandled error in activate_pack_route: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while activating the pack.")
+
+@router.patch("/{collection_id}/{pack_id}/inactivate", response_model=Dict[str, str])
+async def inactivate_pack_route(
+    collection_id: str,
+    pack_id: str,
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Inactivates a pack by setting its is_active field to False.
+
+    Args:
+        collection_id: The ID of the pack collection containing the pack
+        pack_id: The ID of the pack to inactivate
+        db: Firestore client dependency
+
+    Returns:
+        Dictionary with success message
+    """
+    try:
+        # Pass the collection_id as part of the pack_id path parameter
+        # Format: collection_id/pack_id
+        pack_path = f"{collection_id}/{pack_id}"
+
+        await inactivate_pack_in_firestore(
+            pack_id=pack_path,
+            db_client=db
+        )
+        return {
+            "message": f"Successfully inactivated pack '{pack_id}' in collection '{collection_id}'",
+            "pack_id": pack_id,
+            "collection_id": collection_id
+        }
+    except HTTPException:
+        # Re-raise HTTPExceptions from the service layer
+        raise
+    except Exception as e:
+        logger.error(f"Unhandled error in inactivate_pack_route: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal error occurred while inactivating the pack.")
 
 @router.get("/{collection_id}/{pack_id}/cards", response_model=List[StoredCardInfo])
 async def get_pack_cards_route(

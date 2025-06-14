@@ -30,6 +30,7 @@ from service.card_service import (
     add_to_top_hits,
     update_withdraw_request,
     get_user_highlights,
+    withdraw_pending_ship_request,
 )
 from config import get_firestore_client, get_logger
 
@@ -795,6 +796,38 @@ async def update_withdraw_request_route(
     except Exception as e:
         logger.error(f"Error updating withdraw request {request_id} for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while updating the withdraw request")
+
+
+@router.delete("/{user_id}/withdraw-requests/{request_id}", response_model=WithdrawRequestDetail)
+async def withdraw_pending_ship_request_route(
+    user_id: str = Path(..., description="The ID of the user who made the withdraw request"),
+    request_id: str = Path(..., description="The ID of the withdraw request to withdraw"),
+    db: firestore.AsyncClient = Depends(get_firestore_client)
+):
+    """
+    Withdraw (cancel) a pending ship request and return the cards back to the user's collection.
+
+    This endpoint:
+    1. Takes a user ID and request ID as path parameters
+    2. Validates that the withdraw request has a status of 'pending'
+    3. Returns the cards in the withdraw request back to the user's collection
+    4. Marks the withdraw request as 'canceled'
+    5. Returns the updated withdraw request details
+
+    Note: Only withdraw requests with status 'pending' can be withdrawn.
+    """
+    try:
+        withdrawn_request = await withdraw_pending_ship_request(
+            request_id=request_id,
+            user_id=user_id,
+            db_client=db
+        )
+        return withdrawn_request
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error withdrawing pending ship request {request_id} for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An error occurred while withdrawing the pending ship request")
 
 
 

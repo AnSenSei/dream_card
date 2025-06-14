@@ -1,14 +1,15 @@
 import uuid
 import time
+import base64
 from typing import Dict, List, Optional, Any # Ensure 'Any' is imported
 
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException
 from google.cloud import firestore, storage # firestore.ArrayUnion and firestore.ArrayRemove are part of the firestore module
 
 from config import get_logger
 from models.pack_schema import AddPackRequest, CardPack, AddCardToPackRequest,PaginationInfo,AppliedFilters,PaginatedPacksResponse
 from models.schemas import StoredCardInfo
-from utils.gcs_utils import generate_signed_url
+from utils.gcs_utils import generate_signed_url, parse_base64_image, get_file_extension
 
 from google.cloud.firestore_v1 import AsyncClient, ArrayUnion, ArrayRemove, Increment
 
@@ -27,7 +28,7 @@ async def create_pack_in_firestore(
     pack_data: AddPackRequest, 
     db_client: firestore.AsyncClient, 
     storage_client: storage.Client, 
-    image_file: Optional[UploadFile] = None,
+    image_file: Optional[str] = None,  # Changed to accept base64 encoded image string
 ) -> str:
     """
     Creates a new pack in Firestore within a collection structure.
@@ -40,7 +41,7 @@ async def create_pack_in_firestore(
         pack_data: The AddPackRequest model containing pack details and collection_id
         db_client: Firestore client
         storage_client: GCS client for image upload
-        image_file: Optional image file for the pack
+        image_file: Optional base64 encoded image string for the pack (format: "data:image/jpeg;base64,...")
 
     Returns:
         str: The ID of the created pack
@@ -85,22 +86,31 @@ async def create_pack_in_firestore(
             logger.error("Storage client is None inside image_file block.")
             raise HTTPException(status_code=500, detail="Storage client error during image processing.")
         try:
-            bucket = storage_client.bucket(GCS_BUCKET_NAME)
-            file_extension = image_file.filename.split('.')[-1] if '.' in image_file.filename else 'png'
+            # Parse the base64 image string
+            content_type, base64_data = parse_base64_image(image_file)
+
+            # Decode the base64 data
+            image_data = base64.b64decode(base64_data)
+
+            # Get the file extension from the content type
+            file_extension = get_file_extension(content_type)
+
             # Include collection_id in the blob path
             unique_blob_name = f"packs/{collection_id}/{pack_id}.{file_extension}"
-            blob = bucket.blob(unique_blob_name)
 
-            image_file.file.seek(0)
-            blob.upload_from_file(image_file.file, content_type=image_file.content_type)
+            # Upload to GCS
+            bucket = storage_client.bucket(GCS_BUCKET_NAME)
+            blob = bucket.blob(unique_blob_name)
+            blob.upload_from_string(image_data, content_type=content_type)
 
             image_gcs_uri_for_firestore = f"gs://{GCS_BUCKET_NAME}/{unique_blob_name}"
             logger.info(f"Pack image uploaded to GCS. URI: {image_gcs_uri_for_firestore}")
+        except ValueError as ve:
+            logger.error(f"Invalid base64 image format: {ve}", exc_info=True)
+            raise HTTPException(status_code=400, detail=f"Invalid base64 image format: {str(ve)}")
         except Exception as e:
             logger.error(f"Error uploading pack image to GCS: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Could not upload pack image: {str(e)}")
-        finally:
-            image_file.file.close()
 
     try:
         # First, check if the collection document exists
@@ -930,6 +940,55 @@ async def activate_pack_in_firestore(
         logger.error(f"Error activating pack: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to activate pack: {str(e)}")
 
+async def inactivate_pack_in_firestore(
+    pack_id: str,
+    db_client: AsyncClient
+) -> bool:
+    """
+    Inactivates a pack by setting its is_active field to False.
+
+    Args:
+        pack_id: The ID of the pack to inactivate
+        db_client: Firestore client
+
+    Returns:
+        bool: True if the pack was successfully inactivated
+
+    Raises:
+        HTTPException: If the pack doesn't exist or there's an error inactivating it
+    """
+    try:
+        # Check if pack_id contains a slash (indicating collection_id/pack_id format)
+        parts = pack_id.split('/', 1)
+        if len(parts) > 1:
+            # If pack_id includes collection_id (collection_id/pack_id format)
+            collection_id, actual_pack_id = parts
+            logger.info(f"Parsed pack_id '{pack_id}' into collection_id='{collection_id}' and pack_id='{actual_pack_id}'")
+
+            # Construct the reference to the pack document
+            pack_ref = db_client.collection('packs').document(collection_id).collection(collection_id).document(actual_pack_id)
+        else:
+            # If just a simple pack_id
+            logger.warning(f"No collection_id found in pack_id '{pack_id}', using it directly as document ID")
+            pack_ref = db_client.collection('packs').document(pack_id)
+
+        # Check if pack exists
+        pack_snap = await pack_ref.get()
+        if not pack_snap.exists:
+            logger.error(f"Pack not found: {pack_id}")
+            raise HTTPException(status_code=404, detail=f"Pack '{pack_id}' not found")
+
+        # Update the is_active field to False
+        await pack_ref.update({"is_active": False})
+
+        logger.info(f"Successfully inactivated pack '{pack_id}'")
+        return True
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error inactivating pack: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to inactivate pack: {str(e)}")
+
 async def delete_pack_in_firestore(
     pack_id: str,
     db_client: AsyncClient
@@ -1059,6 +1118,106 @@ async def get_inactive_packs_from_collection(collection_id: str, db_client: fire
         raise
     except Exception as e:
         logger.error(f"Error fetching inactive packs from collection '{collection_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not retrieve inactive packs from collection '{collection_id}'.")
+
+async def get_inactive_packs_from_collection_paginated(
+    collection_id: str,
+    db_client: firestore.AsyncClient,
+    page: int = 1,
+    per_page: int = 10,
+    sort_by: Optional[str] = "popularity",
+    sort_order: str = "desc",
+    search_query: Optional[str] = None,
+    search_by_cards: bool = False,
+    cursor: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Gets inactive packs (where is_active == False) from a specific collection in Firestore with pagination, sorting, and filtering.
+
+    Args:
+        collection_id: The ID of the collection to fetch inactive packs from
+        db_client: Firestore client
+        page: Page number (default: 1)
+        per_page: Items per page (default: 10)
+        sort_by: Field to sort by (default: "popularity")
+        sort_order: Sort order (asc or desc, default: desc)
+        search_query: Optional search query to filter packs by name
+        search_by_cards: Whether to search by cards in pack (default: False)
+        cursor: Optional cursor for pagination (ID of the last document in the previous page)
+
+    Returns:
+        Dictionary containing:
+            - packs: List of inactive packs in the collection
+            - pagination: Pagination information
+            - filters: Applied filters
+            - next_cursor: Cursor for the next page
+
+    Raises:
+        HTTPException: If collection not found or on database error
+    """
+    logger.info(f"Fetching inactive packs from collection '{collection_id}' with pagination.")
+
+    valid_sort_fields = ["name", "popularity", "win_rate", "max_win", "min_win"]
+    if sort_by not in valid_sort_fields:
+        sort_by = "popularity"
+
+    reverse = sort_order.lower() == "desc"
+
+    try:
+        # Get all inactive packs first
+        all_inactive_packs = await get_inactive_packs_from_collection(collection_id, db_client)
+
+        # Search filtering
+        if search_query:
+            filtered = []
+            for pack in all_inactive_packs:
+                if search_by_cards:
+                    card_names = pack.cards.keys() if hasattr(pack, "cards") else []
+                    if any(search_query.lower() in card.lower() for card in card_names):
+                        filtered.append(pack)
+                else:
+                    if search_query.lower() in pack.name.lower():
+                        filtered.append(pack)
+            all_inactive_packs = filtered
+
+        # Sort in memory
+        all_inactive_packs.sort(key=lambda p: getattr(p, sort_by, 0) or 0, reverse=reverse)
+
+        # Paginate
+        total_items = len(all_inactive_packs)
+        total_pages = (total_items + per_page - 1) // per_page if total_items > 0 else 1
+        start = (page - 1) * per_page
+        end = start + per_page
+        paginated_packs = all_inactive_packs[start:end]
+        next_cursor = paginated_packs[-1].id if len(paginated_packs) == per_page else None
+
+        pagination_info = PaginationInfo(
+            total_items=total_items,
+            total_pages=total_pages,
+            current_page=page,
+            per_page=per_page
+        )
+
+        filters_info = AppliedFilters(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            search_query=search_query
+        )
+
+        logger.info(f"Returned {len(paginated_packs)} inactive packs (page {page}).")
+
+        return {
+            "packs": paginated_packs,
+            "pagination": pagination_info,
+            "filters": filters_info,
+            "next_cursor": next_cursor
+        }
+
+    except HTTPException:
+        # Re-raise HTTPExceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching inactive packs from collection '{collection_id}' with pagination: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Could not retrieve inactive packs from collection '{collection_id}'.")
 
 async def get_all_cards_in_pack(

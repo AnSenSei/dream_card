@@ -62,6 +62,7 @@ class UserCard(BaseModel):
     expireAt: Optional[datetime] = None
     buybackexpiresAt: Optional[datetime] = None
     request_date: Optional[datetime] = None  # Timestamp for when card was requested for shipping
+    subcollection_name: Optional[str] = None  # The name of the subcollection where the card is stored
 
     class Config:
         from_attributes = True

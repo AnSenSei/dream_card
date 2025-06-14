@@ -22,6 +22,139 @@ from models.schemas import User, UserCard, PaginationInfo, AppliedFilters, UserC
 from utils.gcs_utils import generate_signed_url, upload_avatar_to_gcs, parse_base64_image
 from service.achievements_service import calculate_and_update_level
 
+
+async def withdraw_pending_ship_request(request_id: str, user_id: str, db_client: AsyncClient = None) -> WithdrawRequestDetail:
+    """
+    Withdraw (cancel) a pending ship request and return the cards back to the user's collection.
+
+    This function:
+    1. Retrieves the existing withdraw request
+    2. Validates that the request has a status of 'pending'
+    3. Returns the cards in the withdraw request back to the user's collection
+    4. Marks the withdraw request as 'canceled'
+
+    Args:
+        request_id: The ID of the withdraw request to withdraw
+        user_id: The ID of the user who owns the withdraw request
+        db_client: Firestore client
+
+    Returns:
+        WithdrawRequestDetail object containing the updated withdraw request details
+
+    Raises:
+        HTTPException: If there's an error withdrawing the request
+    """
+    try:
+        logger = get_logger(__name__)
+        logger.info(f"Withdrawing pending ship request {request_id} for user {user_id}")
+
+        # Check if user exists
+        user_ref = db_client.collection(settings.firestore_collection_users).document(user_id)
+        user_doc = await user_ref.get()
+
+        if not user_doc.exists:
+            raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
+
+        # Get the withdraw request
+        withdraw_request_ref = user_ref.collection('withdraw_requests').document(request_id)
+        withdraw_request_doc = await withdraw_request_ref.get()
+
+        if not withdraw_request_doc.exists:
+            raise HTTPException(status_code=404, detail=f"Withdraw request with ID {request_id} not found for user {user_id}")
+
+        # Get the withdraw request data
+        withdraw_request_data = withdraw_request_doc.to_dict()
+
+        # Check if the withdraw request is in a state that can be withdrawn
+        status = withdraw_request_data.get('status', 'pending')
+        if status != 'pending':
+            raise HTTPException(status_code=400, detail=f"Cannot withdraw request with status '{status}'. Only 'pending' requests can be withdrawn.")
+
+        # Get the cards in the withdraw request
+        request_cards_ref = withdraw_request_ref.collection('cards')
+        cards_docs = await request_cards_ref.get()
+
+        if not cards_docs:
+            logger.warning(f"No cards found in withdraw request {request_id}")
+
+        # Use a transaction to return the cards to the user's collection and update the withdraw request
+        @async_transactional
+        async def withdraw_request_transaction(transaction):
+            # Mark the withdraw request as canceled
+            transaction.update(withdraw_request_ref, {
+                'status': 'canceled',
+                'shipping_status': 'canceled'
+            })
+
+            # Return each card to the user's collection
+            for card_doc in cards_docs:
+                card_data = card_doc.to_dict()
+                card_id = card_doc.id
+                card_quantity = card_data.get('quantity', 1)
+                subcollection_name = card_data.get('subcollection_name', 'default')
+
+                # Get the card in the user's collection if it exists
+                user_card_ref = user_ref.collection('cards').document('cards').collection(subcollection_name).document(card_id)
+                user_card_doc = await transaction.get(user_card_ref)
+
+                if user_card_doc.exists:
+                    # Card exists in user's collection, update quantity
+                    user_card_data = user_card_doc.to_dict()
+                    current_quantity = user_card_data.get('quantity', 0)
+                    transaction.update(user_card_ref, {
+                        'quantity': current_quantity + card_quantity
+                    })
+                else:
+                    # Card doesn't exist in user's collection, create it
+                    transaction.set(user_card_ref, {
+                        **card_data,
+                        'quantity': card_quantity
+                    })
+
+        # Execute the transaction
+        await withdraw_request_transaction(db_client.transaction())
+
+        # Get the updated withdraw request
+        updated_withdraw_request_doc = await withdraw_request_ref.get()
+        updated_withdraw_request_data = updated_withdraw_request_doc.to_dict()
+
+        # Get the cards in the withdraw request (should be the same as before)
+        cards = []
+        for card_doc in cards_docs:
+            card_data = card_doc.to_dict()
+            card = UserCard(**card_data)
+            cards.append(card)
+
+        # Create and return the WithdrawRequestDetail object
+        withdraw_request_detail = WithdrawRequestDetail(
+            id=updated_withdraw_request_doc.id,
+            created_at=updated_withdraw_request_data.get('created_at'),
+            request_date=updated_withdraw_request_data.get('request_date'),
+            status=updated_withdraw_request_data.get('status', 'canceled'),
+            user_id=updated_withdraw_request_data.get('user_id', user_id),
+            card_count=updated_withdraw_request_data.get('card_count', len(cards)),
+            cards=cards,
+            shipping_address=updated_withdraw_request_data.get('shipping_address'),
+            shippo_address_id=updated_withdraw_request_data.get('shippo_address_id'),
+            shippo_parcel_id=updated_withdraw_request_data.get('shippo_parcel_id'),
+            shippo_shipment_id=updated_withdraw_request_data.get('shippo_shipment_id'),
+            shippo_transaction_id=updated_withdraw_request_data.get('shippo_transaction_id'),
+            shippo_label_url=updated_withdraw_request_data.get('shippo_label_url'),
+            tracking_number=updated_withdraw_request_data.get('tracking_number'),
+            tracking_url=updated_withdraw_request_data.get('tracking_url'),
+            shipping_status=updated_withdraw_request_data.get('shipping_status', 'canceled')
+        )
+
+        logger.info(f"Successfully withdrew pending ship request {request_id} for user {user_id}")
+        return withdraw_request_detail
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger = get_logger(__name__)
+        logger.error(f"Error withdrawing pending ship request {request_id} for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to withdraw pending ship request: {str(e)}")
+
 logger = get_logger(__name__)
 
 async def validate_address_with_shippo(address: Address) -> bool:
@@ -1976,9 +2109,9 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
     that contains all withdrawn cards.
     For each card, if quantity is less than the card's quantity, only move the specified quantity.
     Only remove a card from the original subcollection if the remaining quantity is 0.
+    This function deducts 550 points from the user's balance as a fee for the withdrawal.
 
-    This function also creates a shipment using the Shippo API and stores the shipping information
-    in the withdraw request document.
+    Note: Shippo integration for shipping labels is handled separately and not in this function.
 
     Args:
         user_id: The ID of the user who owns the cards
@@ -1991,7 +2124,7 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
         List of the updated withdrawn cards as UserCard objects
 
     Raises:
-        HTTPException: If there's an error withdrawing the cards
+        HTTPException: If there's an error withdrawing the cards or if the user doesn't have enough points
     """
     try:
         # Check if user exists
@@ -2001,9 +2134,19 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
         if not user_doc.exists:
             raise HTTPException(status_code=404, detail=f"User with ID {user_id} not found")
 
-        # Get user data to find the address
+        # Get user data to find the address and check points balance
         user_data = user_doc.to_dict()
         user_addresses = user_data.get('addresses', [])
+
+        # Check if user has enough points for the withdrawal fee (550 points)
+        user_points_balance = user_data.get('pointsBalance', 0)
+        withdrawal_fee = 550
+
+        if user_points_balance < withdrawal_fee:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient points balance. You have {user_points_balance} points, but need {withdrawal_fee} points for the withdrawal fee."
+            )
 
         # Find the address with the given ID
         shipping_address = None
@@ -2083,9 +2226,13 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
                 'created_at': now,
                 'card_count': len(cards_data),  # Add count of cards in this request
                 'shipping_address': shipping_address,  # Add shipping address
-                'shipping_status': 'pending'  # Initial shipping status
+                'shipping_status': 'pending',  # Initial shipping status
+                'withdrawal_fee': withdrawal_fee  # Add the withdrawal fee to the request data
             }
             transaction.set(new_request_ref, request_data)
+
+            # Deduct the withdrawal fee from the user's points balance
+            transaction.update(user_ref, {"pointsBalance": Increment(-withdrawal_fee)})
 
             # Process each card
             for card_data in cards_data:
@@ -2225,123 +2372,8 @@ async def withdraw_ship_multiple_cards(user_id: str, cards_to_withdraw: List[Dic
             # Don't raise an exception here, just log the error and continue
             # The withdraw request was created successfully, but the card shipping entry creation failed
 
-        # Now that the transaction is complete, create a shipment using Shippo API
-        try:
-            # Initialize the Shippo SDK with API key
-            if not hasattr(settings, 'shippo_api_key') or not settings.shippo_api_key:
-                logger.error("Shippo API key not configured")
-                raise HTTPException(status_code=500, detail="Shipping service not configured")
-
-            shippo_sdk = Shippo(
-                api_key_header=settings.shippo_api_key
-            )
-
-            # Create a Shippo address object for the shipping address
-            shippo_address = shippo_sdk.addresses.create(
-                components.AddressCreateRequest(
-                    name=shipping_address.get('name', ''),
-                    street1=shipping_address.get('street', ''),
-                    city=shipping_address.get('city', ''),
-                    state=shipping_address.get('state', ''),
-                    zip=shipping_address.get('zip', ''),
-                    country=shipping_address.get('country', ''),
-                    phone=phone_number,
-                    validate=True
-                )
-            )
-
-            # Create a Shippo parcel object for the package
-            shippo_parcel = shippo_sdk.parcels.create(
-                components.ParcelCreateRequest(
-                    length="8",
-                    width="6",
-                    height="2",
-                    distance_unit="in",
-                    weight="16",
-                    mass_unit="oz"
-                )
-            )
-
-            # Create a Shippo shipment object
-            shippo_shipment = shippo_sdk.shipments.create(
-                components.ShipmentCreateRequest(
-                    address_from=components.AddressCreateRequest(
-                        name="Chouka Cards",
-                        street1="123 Main St",
-                        city="San Francisco",
-                        state="CA",
-                        zip="94105",
-                        country="US",
-                        phone="+14155559999",
-                        email="support@choukacards.com"
-                    ),
-                    address_to=components.AddressCreateRequest(
-                        name=shipping_address.get('name', ''),
-                        street1=shipping_address.get('street', ''),
-                        city=shipping_address.get('city', ''),
-                        state=shipping_address.get('state', ''),
-                        zip=shipping_address.get('zip', ''),
-                        country=shipping_address.get('country', ''),
-                        phone=phone_number
-                    ),
-                    parcels=[components.ParcelCreateRequest(
-                        length="6",
-                        width="4",
-                        height="1",
-                        distance_unit="in",
-                        weight="4",
-                        mass_unit="oz"
-                    )],
-                    async_=False
-                )
-            )
-
-            cheapest_rate = min(
-                shippo_shipment.rates,
-                key=lambda r: float(r.amount)
-            )
-
-            # Create a Shippo transaction (purchase a label)
-            shippo_transaction = shippo_sdk.transactions.create(
-                components.TransactionCreateRequest(
-                    rate=cheapest_rate.object_id,
-                    label_file_type="PDF",
-                    async_=False,
-                    insurance_amount=100
-                )
-            )
-
-            # Update the withdraw request document with the Shippo-related information
-            await new_request_ref.update({
-                'shippo_address_id': shippo_address.object_id,
-                'shippo_parcel_id': shippo_parcel.object_id,
-                'shippo_shipment_id': shippo_shipment.object_id,
-                'shippo_transaction_id': shippo_transaction.object_id,
-                'shippo_label_url': shippo_transaction.label_url,
-                'tracking_number': shippo_transaction.tracking_number,
-                'tracking_url': shippo_transaction.tracking_url_provider,
-                'shipping_status': 'label_created'
-            })
-
-            await card_shipping_ref.update({
-                'shippo_address_id': shippo_address.object_id,
-                'shippo_parcel_id': shippo_parcel.object_id,
-                'shippo_shipment_id': shippo_shipment.object_id,
-                'shippo_transaction_id': shippo_transaction.object_id,
-                'shippo_label_url': shippo_transaction.label_url,
-                'tracking_number': shippo_transaction.tracking_number,
-                'tracking_url': shippo_transaction.tracking_url_provider,
-                'shipping_status': 'label_created'
-            })
-
-
-
-            logger.info(f"Successfully created shipment for withdraw request {new_request_ref.id}")
-        except Exception as e:
-            logger.error(f"Error creating shipment for withdraw request {new_request_ref.id}: {e}", exc_info=True)
-            # Don't raise an exception here, just log the error and continue
-            # The withdraw request was created successfully, but the shipment creation failed
-            # The shipment can be created manually later
+        # Note: Shippo integration for shipping labels is now handled separately
+        logger.info(f"Withdraw request {new_request_ref.id} created successfully. Shipping will be handled separately.")
 
         logger.info(f"Successfully created withdraw request for {len(withdrawn_cards)} cards from user {user_id}'s subcollection {subcollection_name}")
         return withdrawn_cards
@@ -3576,6 +3608,67 @@ async def update_withdraw_request(request_id: str, user_id: str, cards_to_withdr
         # Execute the transaction
         transaction = db_client.transaction()
         await update_withdraw_request_transaction(transaction)
+
+        # Now that the transaction is complete, update the entry in the card_shipping collection
+        try:
+            # Get the card_shipping document
+            card_shipping_ref = db_client.collection('card_shipping').document(request_id)
+            card_shipping_doc = await card_shipping_ref.get()
+
+            if not card_shipping_doc.exists:
+                logger.warning(f"Card shipping document for withdraw request {request_id} not found, creating a new one")
+                # Create a new document if it doesn't exist
+                card_shipping_ref = db_client.collection('card_shipping').document(request_id)
+
+            # Get the updated withdraw request data
+            withdraw_request_doc = await withdraw_request_ref.get()
+            withdraw_request_data = withdraw_request_doc.to_dict()
+
+            # Prepare the card shipping data
+            card_shipping_data = {
+                'request_id': request_id,
+                'user_id': user_id,
+                'request_date': withdraw_request_data.get('request_date'),
+                'status': withdraw_request_data.get('status', 'pending'),
+                'shipping_address': shipping_address,
+                'shipping_status': withdraw_request_data.get('shipping_status', 'pending'),
+                'card_count': len(cards_data),
+                'updated_at': datetime.now()
+            }
+
+            # Add phone_number if provided
+            if phone_number:
+                card_shipping_data['phone_number'] = phone_number
+
+            # Add the cards data to the card shipping document
+            cards_list = []
+            for card_data in cards_data:
+                card_id = card_data['card_id']
+                request_card_ref = card_data['request_card_ref']
+                request_card_doc = await request_card_ref.get()
+                request_card_data = request_card_doc.to_dict()
+
+                card_info = {
+                    'card_id': card_id,
+                    'card_reference': request_card_data.get('card_reference', ''),
+                    'card_name': request_card_data.get('card_name', ''),
+                    'quantity': request_card_data.get('quantity', 0),
+                    'image_url': request_card_data.get('image_url', ''),
+                    'rarity': request_card_data.get('rarity', 1),
+                    'point_worth': request_card_data.get('point_worth', 0)
+                }
+                cards_list.append(card_info)
+
+            card_shipping_data['cards'] = cards_list
+
+            # Update the card shipping document
+            await card_shipping_ref.set(card_shipping_data)
+
+            logger.info(f"Successfully updated card shipping entry for withdraw request {request_id}")
+        except Exception as e:
+            logger.error(f"Error updating card shipping entry for withdraw request {request_id}: {e}", exc_info=True)
+            # Don't raise an exception here, just log the error and continue
+            # The withdraw request was updated successfully, but the card shipping entry update failed
 
         # Get the updated withdraw request
         updated_withdraw_request = await get_withdraw_request_by_id(request_id, user_id, db_client)

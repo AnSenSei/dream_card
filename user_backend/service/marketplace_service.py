@@ -47,7 +47,7 @@ Please complete the payment within the next 48 hours to finalize the transaction
 
 Thank you for using our marketplace!
 
-The Chouka Cards Team
+The zapull Team
 """
 
         # Send the email using Mailgun API
@@ -55,7 +55,7 @@ The Chouka Cards Team
             "https://api.mailgun.net/v3/sandbox8cfcd36a145642ff953f9280ab213285.mailgun.org/messages",
             auth=("api", settings.mailgun_api),
             data={
-                "from": "Chouka Cards <postmaster@mg.zapull.fun>",
+                "from": "zapull <postmaster@mg.zapull.fun>",
                 "to": f"{to_name} <{to_email}>",
                 "subject": subject,
                 "text": text
@@ -105,7 +105,7 @@ The transaction has been completed successfully.
 
 Thank you for using our marketplace!
 
-The Chouka Cards Team
+The zapull Team
 """
 
         # Send the email using Mailgun API
@@ -113,7 +113,7 @@ The Chouka Cards Team
             "https://api.mailgun.net/v3/sandbox8cfcd36a145642ff953f9280ab213285.mailgun.org/messages",
             auth=("api", settings.mailgun_api),
             data={
-                "from": "Chouka Cards <postmaster@mg.zapull.fun>",
+                "from": "zapull <postmaster@mg.zapull.fun>",
                 "to": f"{to_name} <{to_email}>",
                 "subject": subject,
                 "text": text
